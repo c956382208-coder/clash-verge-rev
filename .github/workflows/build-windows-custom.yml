@@ -1,0 +1,150 @@
+name: Build Windows Custom
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - custom-dashboard
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-custom-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HUSKY: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # package.json declares pnpm@11.3.0. v2.5.2 has no engines field; its
+      # own dev workflow pins Node 24.18.0.
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.18.0'
+
+      - name: Enable the package-manager-pinned pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          $pnpmVersion = (pnpm --version).Trim()
+          if ($pnpmVersion -ne '11.3.0') {
+            throw "Expected pnpm 11.3.0 from package.json, got $pnpmVersion"
+          }
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      # rust-toolchain.toml pins 1.95.0. This is the MSVC target only; no GNU
+      # target or local toolchain installation is involved.
+      - name: Install pinned Rust toolchain and target
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore fixed v2.5.2 Windows build resources
+        shell: pwsh
+        run: |
+          $assetUrl = 'https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe'
+          $expectedSha256 = 'ba42f00b1082e352352080170fe86ae411bcc854cb13f1b8bebc9025e8a7cbf4'
+          $installer = Join-Path $env:RUNNER_TEMP 'Clash.Verge_2.5.2_x64-setup.exe'
+          $extracted = Join-Path $env:RUNNER_TEMP 'clash-verge-v2.5.2-x64'
+
+          Invoke-WebRequest -Uri $assetUrl -OutFile $installer
+          $actualSha256 = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "Official v2.5.2 installer SHA-256 mismatch: $actualSha256"
+          }
+
+          New-Item -ItemType Directory -Force -Path $extracted | Out-Null
+          & 7z x $installer "-o$extracted" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7z could not extract the fixed v2.5.2 installer"
+          }
+
+          $requiredFiles = @(
+            'verge-mihomo.exe',
+            'verge-mihomo-alpha.exe',
+            'resources/Country.mmdb',
+            'resources/enableLoopback.exe',
+            'resources/geoip.dat',
+            'resources/geosite.dat',
+            'resources/clash-verge-service.exe',
+            'resources/clash-verge-service-install.exe',
+            'resources/clash-verge-service-uninstall.exe'
+          )
+          foreach ($requiredFile in $requiredFiles) {
+            if (-not (Test-Path (Join-Path $extracted $requiredFile))) {
+              throw "The official v2.5.2 installer did not contain $requiredFile"
+            }
+          }
+
+          New-Item -ItemType Directory -Force -Path 'src-tauri/sidecar', 'src-tauri/resources' | Out-Null
+          Copy-Item (Join-Path $extracted 'resources/*') 'src-tauri/resources' -Recurse -Force
+          Copy-Item (Join-Path $extracted 'verge-mihomo.exe') 'src-tauri/sidecar/verge-mihomo-x86_64-pc-windows-msvc.exe' -Force
+          Copy-Item (Join-Path $extracted 'verge-mihomo-alpha.exe') 'src-tauri/sidecar/verge-mihomo-alpha-x86_64-pc-windows-msvc.exe' -Force
+
+      # The project prebuild script sees the restored files and reuses them. Its
+      # only remaining Windows input is its versioned SimpleSC 1.30 download.
+      - name: Prepare Windows sidecars and NSIS plugin
+        run: pnpm run prebuild x86_64-pc-windows-msvc
+
+      - name: Fetch Cargo dependencies from Cargo.lock
+        run: cargo fetch --locked --target x86_64-pc-windows-msvc
+
+      - name: TypeScript check
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Build web frontend
+        run: pnpm run web:build
+
+      - name: Cargo check with development logging
+        working-directory: src-tauri
+        run: cargo check --locked --target x86_64-pc-windows-msvc --features verge-dev
+
+      # This merges the CI-only override with tauri.conf.json. It leaves the
+      # updater plugin, public key, endpoints, and normal release config intact.
+      - name: Build Windows NSIS installer without updater artifacts
+        run: pnpm build -- --config src-tauri/tauri.ci.conf.json --target x86_64-pc-windows-msvc
+
+      - name: Stage final Windows installers
+        shell: pwsh
+        run: |
+          $bundleRoot = 'target/x86_64-pc-windows-msvc/release/bundle'
+          $artifactDir = 'artifacts/windows'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $installers = @()
+          if (Test-Path "$bundleRoot/nsis") {
+            $installers += Get-ChildItem "$bundleRoot/nsis" -File -Filter '*.exe'
+          }
+          if (Test-Path "$bundleRoot/msi") {
+            $installers += Get-ChildItem "$bundleRoot/msi" -File -Filter '*.msi'
+          }
+          if ($installers.Count -eq 0) {
+            throw 'No NSIS installer EXE or MSI bundle was produced.'
+          }
+
+          $installers | ForEach-Object { Copy-Item $_.FullName -Destination $artifactDir -Force }
+          Get-ChildItem $artifactDir -File | Select-Object Name, Length
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: clash-verge-custom-v2.5.2-windows
+          path: artifacts/windows
+          if-no-files-found: error

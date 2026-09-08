@@ -754,14 +754,34 @@ const resolveUnSetDnsScript = () =>
 const tasks = [
   {
     name: 'verge-mihomo-alpha',
-    func: () =>
-      getLatestAlphaVersion().then(() => resolveSidecar(clashMetaAlpha())),
+    func: async () => {
+      const sidecarPath = path.join(
+        SIDECAR_DIR,
+        `verge-mihomo-alpha-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
+      )
+      if (!FORCE && fs.existsSync(sidecarPath)) {
+        log_success('"verge-mihomo-alpha" already exists, skipping download')
+        return
+      }
+      await getLatestAlphaVersion()
+      await resolveSidecar(clashMetaAlpha())
+    },
     retry: 5,
   },
   {
     name: 'verge-mihomo',
-    func: () =>
-      getLatestReleaseVersion().then(() => resolveSidecar(clashMeta())),
+    func: async () => {
+      const sidecarPath = path.join(
+        SIDECAR_DIR,
+        `verge-mihomo-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
+      )
+      if (!FORCE && fs.existsSync(sidecarPath)) {
+        log_success('"verge-mihomo" already exists, skipping download')
+        return
+      }
+      await getLatestReleaseVersion()
+      await resolveSidecar(clashMeta())
+    },
     retry: 5,
   },
   { name: 'plugin', func: resolvePlugin, retry: 5, winOnly: true },

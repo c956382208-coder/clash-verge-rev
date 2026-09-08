@@ -243,9 +243,14 @@ pub fn ipc_path() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("Failed to determine ipc path"))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "verge-dev")))]
 pub fn ipc_path() -> Result<PathBuf> {
     Ok(PathBuf::from(r"\\.\pipe\verge-mihomo"))
+}
+
+#[cfg(all(target_os = "windows", feature = "verge-dev"))]
+pub fn ipc_path() -> Result<PathBuf> {
+    Ok(PathBuf::from(r"\\.\pipe\verge-mihomo-dev"))
 }
 #[async_trait]
 pub trait PathBufExec {

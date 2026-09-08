@@ -551,17 +551,25 @@ pub(super) async fn stop_core_by_service() -> Result<()> {
 
 /// 检查服务是否正在运行
 pub async fn is_service_available() -> Result<()> {
-    if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
-        let verge = Config::verge().await;
-        let verge_last = verge.latest_arc();
-        let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
-        if is_enable {
-            logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
-        }
-        return Err(e.into());
+    #[cfg(feature = "verge-dev")]
+    {
+        bail!("Clash Verge Service is disabled in the isolated development build");
     }
-    clash_verge_service_ipc::connect().await?;
-    Ok(())
+
+    #[cfg(not(feature = "verge-dev"))]
+    {
+        if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
+            let verge = Config::verge().await;
+            let verge_last = verge.latest_arc();
+            let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
+            if is_enable {
+                logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
+            }
+            return Err(e.into());
+        }
+        clash_verge_service_ipc::connect().await?;
+        Ok(())
+    }
 }
 
 async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
@@ -590,7 +598,15 @@ async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
 }
 
 pub fn is_service_ipc_path_exists() -> bool {
-    Path::new(clash_verge_service_ipc::IPC_PATH).exists()
+    #[cfg(feature = "verge-dev")]
+    {
+        false
+    }
+
+    #[cfg(not(feature = "verge-dev"))]
+    {
+        Path::new(clash_verge_service_ipc::IPC_PATH).exists()
+    }
 }
 
 impl ServiceManager {
