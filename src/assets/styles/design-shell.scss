@@ -1,0 +1,128 @@
+/* React shell adapters. The visual primitives below remain the classes copied
+   from clash-verge-dashboard/style.css; this file only connects them to the
+   Tauri host and the existing routed pages. */
+.design-app {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #01040d;
+
+  .viewport-wrapper {
+    width: 100%;
+    height: 100%;
+  }
+
+  .window-shell {
+    position: relative;
+    width: 1024px;
+    height: 683px;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .design-static-shell {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+
+  .design-route-content {
+    position: absolute;
+    z-index: 30;
+    inset: 90px 10px 28px 153px;
+    display: none;
+    overflow: auto;
+    color: #fff;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(56, 189, 248, 0.45) transparent;
+  }
+
+  &.route-mode {
+    .design-route-content {
+      display: block;
+    }
+
+    .design-static-shell > .card,
+    .design-static-shell > .footer-bar {
+      display: none;
+    }
+  }
+
+  .design-route-content .base-page {
+    min-height: 100%;
+    height: auto;
+    color: #fff;
+    background: transparent;
+
+    > header {
+      min-height: 46px;
+      height: auto;
+      padding: 8px 12px;
+      border: 0;
+      color: #fff;
+    }
+
+    .base-container,
+    .base-container > section,
+    .base-content {
+      width: 100%;
+      height: auto;
+      background: transparent !important;
+    }
+
+    .base-container > section {
+      overflow: visible;
+      padding: 0;
+    }
+
+    .base-content {
+      margin: 0;
+    }
+  }
+
+  .design-route-content .MuiPaper-root {
+    color: #fff;
+    border-color: rgba(45, 120, 235, 0.32);
+    background: rgba(6, 20, 44, 0.72);
+  }
+
+  .design-route-content .MuiTypography-root {
+    color: inherit;
+  }
+
+  .design-data-empty {
+    display: flex;
+    min-height: 80px;
+    align-items: center;
+    justify-content: center;
+    color: #7b93b2;
+    font-size: 11px;
+  }
+
+  .design-shell-drag-region {
+    position: absolute;
+    z-index: 11;
+    top: 0;
+    left: 142px;
+    right: 420px;
+    height: 32px;
+    pointer-events: auto;
+  }
+}
+
+@media (max-width: 800px) {
+  .design-app {
+    .window-shell {
+      border-radius: 0;
+    }
+
+    .design-route-content {
+      inset: 90px 8px 24px 142px;
+    }
+  }
+}
