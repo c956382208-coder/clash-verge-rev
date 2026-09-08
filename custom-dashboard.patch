@@ -1,0 +1,1771 @@
+diff --git a/.github/workflows/build-windows-custom.yml b/.github/workflows/build-windows-custom.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c55de1d3e9da7f5b96ddf41e634ca461b9b6b594
+--- /dev/null
++++ b/.github/workflows/build-windows-custom.yml
+@@ -0,0 +1,150 @@
++name: Build Windows Custom
++
++on:
++  workflow_dispatch:
++  push:
++    branches:
++      - custom-dashboard
++
++permissions:
++  contents: read
++
++concurrency:
++  group: build-windows-custom-${{ github.ref }}
++  cancel-in-progress: true
++
++env:
++  HUSKY: 0
++  CARGO_NET_GIT_FETCH_WITH_CLI: true
++
++jobs:
++  build-windows:
++    runs-on: windows-latest
++
++    steps:
++      - name: Checkout repository
++        uses: actions/checkout@v7
++        with:
++          fetch-depth: 0
++
++      # package.json declares pnpm@11.3.0. v2.5.2 has no engines field; its
++      # own dev workflow pins Node 24.18.0.
++      - name: Install Node.js
++        uses: actions/setup-node@v6
++        with:
++          node-version: '24.18.0'
++
++      - name: Enable the package-manager-pinned pnpm
++        shell: pwsh
++        run: |
++          corepack enable
++          $pnpmVersion = (pnpm --version).Trim()
++          if ($pnpmVersion -ne '11.3.0') {
++            throw "Expected pnpm 11.3.0 from package.json, got $pnpmVersion"
++          }
++
++      - name: Install JavaScript dependencies
++        run: pnpm install --frozen-lockfile
++
++      # rust-toolchain.toml pins 1.95.0. This is the MSVC target only; no GNU
++      # target or local toolchain installation is involved.
++      - name: Install pinned Rust toolchain and target
++        uses: dtolnay/rust-toolchain@1.95.0
++        with:
++          targets: x86_64-pc-windows-msvc
++
++      - name: Restore fixed v2.5.2 Windows build resources
++        shell: pwsh
++        run: |
++          $assetUrl = 'https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe'
++          $expectedSha256 = 'ba42f00b1082e352352080170fe86ae411bcc854cb13f1b8bebc9025e8a7cbf4'
++          $installer = Join-Path $env:RUNNER_TEMP 'Clash.Verge_2.5.2_x64-setup.exe'
++          $extracted = Join-Path $env:RUNNER_TEMP 'clash-verge-v2.5.2-x64'
++
++          Invoke-WebRequest -Uri $assetUrl -OutFile $installer
++          $actualSha256 = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
++          if ($actualSha256 -ne $expectedSha256) {
++            throw "Official v2.5.2 installer SHA-256 mismatch: $actualSha256"
++          }
++
++          New-Item -ItemType Directory -Force -Path $extracted | Out-Null
++          & 7z x $installer "-o$extracted" -y
++          if ($LASTEXITCODE -ne 0) {
++            throw "7z could not extract the fixed v2.5.2 installer"
++          }
++
++          $requiredFiles = @(
++            'verge-mihomo.exe',
++            'verge-mihomo-alpha.exe',
++            'resources/Country.mmdb',
++            'resources/enableLoopback.exe',
++            'resources/geoip.dat',
++            'resources/geosite.dat',
++            'resources/clash-verge-service.exe',
++            'resources/clash-verge-service-install.exe',
++            'resources/clash-verge-service-uninstall.exe'
++          )
++          foreach ($requiredFile in $requiredFiles) {
++            if (-not (Test-Path (Join-Path $extracted $requiredFile))) {
++              throw "The official v2.5.2 installer did not contain $requiredFile"
++            }
++          }
++
++          New-Item -ItemType Directory -Force -Path 'src-tauri/sidecar', 'src-tauri/resources' | Out-Null
++          Copy-Item (Join-Path $extracted 'resources/*') 'src-tauri/resources' -Recurse -Force
++          Copy-Item (Join-Path $extracted 'verge-mihomo.exe') 'src-tauri/sidecar/verge-mihomo-x86_64-pc-windows-msvc.exe' -Force
++          Copy-Item (Join-Path $extracted 'verge-mihomo-alpha.exe') 'src-tauri/sidecar/verge-mihomo-alpha-x86_64-pc-windows-msvc.exe' -Force
++
++      # The project prebuild script sees the restored files and reuses them. Its
++      # only remaining Windows input is its versioned SimpleSC 1.30 download.
++      - name: Prepare Windows sidecars and NSIS plugin
++        run: pnpm run prebuild x86_64-pc-windows-msvc
++
++      - name: Fetch Cargo dependencies from Cargo.lock
++        run: cargo fetch --locked --target x86_64-pc-windows-msvc
++
++      - name: TypeScript check
++        run: pnpm run typecheck
++
++      - name: Lint
++        run: pnpm run lint
++
++      - name: Build web frontend
++        run: pnpm run web:build
++
++      - name: Cargo check with development logging
++        working-directory: src-tauri
++        run: cargo check --locked --target x86_64-pc-windows-msvc --features verge-dev
++
++      # This merges the CI-only override with tauri.conf.json. It leaves the
++      # updater plugin, public key, endpoints, and normal release config intact.
++      - name: Build Windows NSIS installer without updater artifacts
++        run: pnpm build -- --config src-tauri/tauri.ci.conf.json --target x86_64-pc-windows-msvc
++
++      - name: Stage final Windows installers
++        shell: pwsh
++        run: |
++          $bundleRoot = 'target/x86_64-pc-windows-msvc/release/bundle'
++          $artifactDir = 'artifacts/windows'
++          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
++
++          $installers = @()
++          if (Test-Path "$bundleRoot/nsis") {
++            $installers += Get-ChildItem "$bundleRoot/nsis" -File -Filter '*.exe'
++          }
++          if (Test-Path "$bundleRoot/msi") {
++            $installers += Get-ChildItem "$bundleRoot/msi" -File -Filter '*.msi'
++          }
++          if ($installers.Count -eq 0) {
++            throw 'No NSIS installer EXE or MSI bundle was produced.'
++          }
++
++          $installers | ForEach-Object { Copy-Item $_.FullName -Destination $artifactDir -Force }
++          Get-ChildItem $artifactDir -File | Select-Object Name, Length
++
++      - name: Upload Windows installers
++        uses: actions/upload-artifact@v7
++        with:
++          name: clash-verge-custom-v2.5.2-windows
++          path: artifacts/windows
++          if-no-files-found: error
+diff --git a/docs/custom-ui-mapping.md b/docs/custom-ui-mapping.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..85d555e509f28dc2fb58578daada0167b09d4671
+--- /dev/null
++++ b/docs/custom-ui-mapping.md
+@@ -0,0 +1,86 @@
++# Custom UI Mapping
++
++## Scope and source baseline
++
++- Upstream source: Clash Verge Rev `v2.5.2` from the supplied GitHub source archive.
++- Working branch: `custom-dashboard`.
++- Goal: rebuild the supplied dashboard as native React and TypeScript components inside the existing application.  The static design files are a visual reference only; their mock data, timers, fake toggles, and fake connection state are not application logic.
++
++The implementation keeps the existing page router, Tauri commands, stores, Mihomo API client, and Rust backend.  It does not embed the supplied `index.html` or execute its `app.js`.
++
++## Application integration
++
++| New dashboard area | Existing Clash Verge implementation | State / hook | API or Tauri command | Backend / transport | Reuse plan |
++| --- | --- | --- | --- | --- | --- |
++| App shell, route, and navigation | `src/pages/_routers.tsx`, `src/pages/_layout.tsx`, `src/pages/_navigation.tsx` | React Router | N/A | Tauri window | Replace the home-page content with React components while retaining the existing layout, routing, shortcuts, and page routes. |
++| Home dashboard composition | `src/pages/home.tsx` | `AppDataProvider` in `src/providers/app-data-provider.tsx` | Query hooks backed by `src/services/cmds.ts` | Commands and Mihomo client | Introduce dashboard-specific TypeScript components under `src/components/dashboard/`, and compose them from `home.tsx`. |
++
++## Functional mapping
++
++| Dashboard function | Clash Verge original component(s) | Store / hook | API / Tauri command | Backend implementation | Planned reuse |
++| --- | --- | --- | --- | --- | --- |
++| Home | `src/pages/home.tsx`; `home-profile-card.tsx`, `current-proxy-card.tsx`, `proxy-tun-card.tsx`, `clash-mode-card.tsx`, `enhanced-traffic-stats.tsx`, `ip-info-card.tsx` | `useAppRefreshers`, app-data contexts | Aggregates the commands below | Existing frontend composition | Replace the visual composition only. Retain the original data sources and error/loading paths. |
++| System Proxy | `src/components/shared/proxy-control-switches.tsx`, `src/components/home/proxy-tun-card.tsx` | `useSystemProxyState` (`src/hooks/use-system-proxy-state.ts`), `useSystemData`, `useVerge` | `patch_verge_config`, `get_sys_proxy`, `get_auto_proxy` | `src-tauri/src/feat/config.rs` processes `SYS_PROXY`; `src-tauri/src/core/sysopt.rs` calls Windows `sysproxy`; `src-tauri/src/cmd/network.rs` reads OS settings | Bind the dashboard switch to `toggleSystemProxy`; preserve the app/OS-state mismatch indicator. Never simulate the toggle. |
++| TUN | `proxy-control-switches.tsx`, `proxy-tun-card.tsx`; settings TUN views | `useSystemState`, `useVerge` | `patch_verge_config`; service commands including `is_service_available` | `feat/config.rs`; `core/service.rs`; service IPC and Windows service lifecycle | Reuse the existing switch and availability checks. In isolated development, keep it unavailable; test it only in a dedicated, user-approved Windows test environment. |
++| Clash Mode | `src/components/home/clash-mode-card.tsx` | `useClashConfigData`, `useRuntimeConfig`, `useClashMode`, `useClash` | `get_clash_config`, `get_runtime_config`, `get_clash_mode`, `patch_clash_mode` | `src-tauri/src/cmd/clash.rs`; `src-tauri/src/feat/clash.rs::change_clash_mode`, which patches Mihomo and refreshes tray/connections | Reuse the existing optimistic update with error rollback for Rule / Global / Direct mode pills. |
++| Current Proxy | `src/components/home/current-proxy-card.tsx` | `useProxiesData`, `useClashConfigData`, `useProxySelection`, delay state | `get_proxies` through `tauri-plugin-mihomo-api`; `sync_tray_proxy_selection` | Mihomo API plugin; `src-tauri/src/cmd/proxy.rs`; tray sync | Display real selected proxy and group state in the dashboard hero card. |
++| Proxy Groups | `src/pages/proxies.tsx`, `src/components/proxy/proxy-groups.tsx` | `useProxiesData`, proxy polling / refreshers | `calcuProxies` in `src/services/cmds.ts` | Mihomo API `getProxies`, `getProxyProviders`; profile group-order data | Use the calculated group ordering and existing proxy page as the authoritative source; dashboard gets a compact group summary / link. |
++| Proxy Node Selection | Proxy group views and `current-proxy-card.tsx` | `useProxySelection` (`src/hooks/use-proxy-selection.ts`) | Mihomo `selectNodeForGroup`; `sync_tray_proxy_selection` | Mihomo API changes the active group node; Rust command refreshes tray selection | Route every dashboard selection through `selectNodeForGroup`, persist the selection as the existing hook does, and retain optional connection cleanup. |
++| Latency | Proxy node views; delay controls on `current-proxy-card.tsx` | `useProxyDelayState`, `useDelayManager` | Mihomo `delayProxyByName`, provider health check | `src/services/delay.ts`; Rust `test_delay` command also exists in `cmd/clash.rs` / `feat/clash.rs` | Use the shared delay manager/cache and show pending/failure states. No random latency values. |
++| Traffic WebSocket | `src/components/home/enhanced-traffic-stats.tsx` | `useTrafficData` (`src/hooks/use-traffic-data.ts`), `useMihomoWsSubscription` | `MihomoWebSocket.connect_traffic()` | Mihomo WebSocket over the running core IPC endpoint | Feed dashboard charts and total counters from the existing throttled 200 ms stream. |
++| Connections | `src/pages/connections.tsx`; traffic card | `useConnectionData`, `useConnectionSummaryData` (`src/hooks/use-connection-data.ts`) | `MihomoWebSocket.connect_connections`; Mihomo connection operations | Mihomo WebSocket with 500 ms throttling; plugin supports closing connections | Use actual active-count and connection history. Keep the existing Connections page for full inspection and controls. |
++| IP Information | `src/components/home/ip-info-card.tsx` | `useIPInfo` in that component | `getIpInfo` (`src/services/api.ts`) | Existing IP-service fallback list in the frontend | Reuse the existing 300-second cached lookup and its loading/error UI. Do not add a second IP source or hard-code an address. |
++| Profiles / subscriptions | `src/pages/profiles.tsx`, `src/components/home/home-profile-card.tsx` | `useProfiles` (`src/hooks/use-profiles.ts`), refreshers | `get_profiles`, `patch_profiles_config`, profile update/import commands | `src-tauri/src/cmd/profile.rs`, `src-tauri/src/feat/profile.rs`, persisted profile config | Dashboard subscription card shows the real current profile and real usage / expiry metadata only. Full import, update, ordering, and deletion stay on Profiles. |
++| Settings | `src/pages/settings.tsx`; `setting-system.tsx`, `setting-clash.tsx`, `setting-verge-basic.tsx`, `setting-verge-advanced.tsx` | Existing setting hooks and form state | `get_verge_config`, `patch_verge_config`, Clash config commands | `src-tauri/src/cmd/verge.rs`, `feat/config.rs`, system and core managers | Preserve Settings routes/components for detailed editing. Dashboard controls call the same commands instead of duplicating configuration forms. |
++| Rules | `src/pages/rules.tsx` and rule components | Existing rules data hooks | Mihomo rules API | Mihomo API client | Retain the existing page and navigate to it from the redesigned sidebar. |
++| Logs | `src/pages/logs.tsx` and log components | Existing log state | Existing log stream / commands | Tauri log integration | Retain the existing page and navigate to it from the redesigned sidebar. |
++| Tray synchronisation | Proxy and mode hooks | `useProxySelection`, `useClash` | `sync_tray_proxy_selection` | `src-tauri/src/cmd/proxy.rs`, `src-tauri/src/core/tray/mod.rs` | Do not reimplement a dashboard-only state: every relevant action continues to update the native tray. |
++
++## Dashboard design asset audit
++
++The supplied design archive contains usable visual material in `css/style.css`, `assets/`, and layout ideas in `index.html`.  It also contains prototype-only behavior in `js/app.js`, including:
++
++- hard-coded subscription, node, current-proxy, latency, and IP values;
++- fake connected state and fake System Proxy / TUN toggles;
++- `setTimeout`-based subscription refresh;
++- `setInterval` and random traffic, connection, CPU, and ping values.
++
++Only styles, non-functional markup patterns, and suitable assets may migrate.  All of the above prototype behavior is excluded from the production React implementation.
++
++## Safe development baseline
++
++`verge-dev` already gives the Rust application a separate data directory: `io.github.clash-verge-rev.clash-verge-rev.dev` (see `src-tauri/src/utils/dirs.rs`).  That isolates generated Verge configuration, profiles, logs, and data from the installed production application's normal data directory.
++
++It is not sufficient on Windows by itself:
++
++1. the original code uses the production Mihomo named pipe `\\.\pipe\verge-mihomo` even under `verge-dev`;
++2. defaults for proxy and controller ports overlap the installed application;
++3. startup can probe the shared Clash Verge Service and use it to start a core;
++4. startup calls Windows system-proxy reconciliation, which could change the live OS proxy setting;
++5. TUN and the Windows service are host-wide resources, not application-data resources.
++
++Before running `pnpm dev`, this branch adds **development-feature-only** guards and endpoint names to ensure that a development process:
++
++- uses a distinct Mihomo IPC pipe and ports;
++- never connects to or starts the installed Clash Verge Service;
++- never reconciles or changes the Windows System Proxy;
++- reports TUN unavailable and rejects System Proxy / TUN enablement rather than pretending that it worked.
++
++The implementation is intentionally confined to `verge-dev`:
++
++- `src-tauri/src/constants.rs` provides development-only controller and proxy ports `19097`, `17897`, `17898`, and `17899`.
++- `src-tauri/src/utils/dirs.rs` uses `\\.\pipe\verge-mihomo-dev` instead of the production pipe.
++- `src-tauri/src/utils/resolve/mod.rs`, `core/service.rs`, and `cmd/service.rs` bypass or reject shared Clash Verge Service operations.
++- `src-tauri/src/feat/config.rs` rejects System Proxy and TUN changes before they can update host-wide state.
++- `src/components/shared/proxy-control-switches.tsx` disables these host-wide controls in the Vite development runtime, instead of showing a fake successful toggle.
++
++The official prebuild script in `scripts/prebuild.mjs` was also made reproducible when sidecars already exist: it now skips an online "latest" version lookup before deciding whether a sidecar must be downloaded.  For this local baseline, the ignored `src-tauri/sidecar/` and `src-tauri/resources/` inputs were copied read-only from the installed official v2.5.2 package and SHA-256 checked against the source files.  The installed package itself was not modified.
++
++This permits safe work on the React dashboard and real, isolated Mihomo data flows.  System Proxy and TUN cannot be proven end-to-end on this host while the production application is in use: both intentionally modify host-wide state.  Those two integration tests require a separate Windows VM / test account, or an explicit, controlled maintenance window after the user has stopped the production application and approved the host-wide change.
++
++## Delivery gates
++
++1. **Inspect and map** — this document and the upstream baseline commit.
++2. **Safe baseline** — apply and review dev-only isolation, then install dependencies, run prebuild, and launch the isolated development app.
++3. **Implement** — transform the design into React/TypeScript dashboard components, binding every displayed datum and action to the mapping above.
++4. **Test and fix** — typecheck/lint/build and manually verify real core data paths; System Proxy/TUN only in the dedicated test environment described above.
+diff --git a/scripts/prebuild.mjs b/scripts/prebuild.mjs
+index b506f40af8354828f59515c3bc16734a1bc6dcb4..7ad6c53eed4c0fc105ad222ddf19bcb94bef4378 100644
+--- a/scripts/prebuild.mjs
++++ b/scripts/prebuild.mjs
+@@ -754,14 +754,34 @@ const resolveUnSetDnsScript = () =>
+ const tasks = [
+   {
+     name: 'verge-mihomo-alpha',
+-    func: () =>
+-      getLatestAlphaVersion().then(() => resolveSidecar(clashMetaAlpha())),
++    func: async () => {
++      const sidecarPath = path.join(
++        SIDECAR_DIR,
++        `verge-mihomo-alpha-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
++      )
++      if (!FORCE && fs.existsSync(sidecarPath)) {
++        log_success('"verge-mihomo-alpha" already exists, skipping download')
++        return
++      }
++      await getLatestAlphaVersion()
++      await resolveSidecar(clashMetaAlpha())
++    },
+     retry: 5,
+   },
+   {
+     name: 'verge-mihomo',
+-    func: () =>
+-      getLatestReleaseVersion().then(() => resolveSidecar(clashMeta())),
++    func: async () => {
++      const sidecarPath = path.join(
++        SIDECAR_DIR,
++        `verge-mihomo-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
++      )
++      if (!FORCE && fs.existsSync(sidecarPath)) {
++        log_success('"verge-mihomo" already exists, skipping download')
++        return
++      }
++      await getLatestReleaseVersion()
++      await resolveSidecar(clashMeta())
++    },
+     retry: 5,
+   },
+   { name: 'plugin', func: resolvePlugin, retry: 5, winOnly: true },
+diff --git a/src-tauri/src/cmd/service.rs b/src-tauri/src/cmd/service.rs
+index 862b2cbb36c986bee74f9b903acc562ad3137f5f..fc8a64dc370f25164eefbf788d4016d2b94abca3 100644
+--- a/src-tauri/src/cmd/service.rs
++++ b/src-tauri/src/cmd/service.rs
+@@ -2,10 +2,19 @@ use super::{CmdResult, StringifyErr as _};
+ use crate::core::service::{self, SERVICE_MANAGER, ServiceStatus};
+ 
+ async fn execute_service_operation_sync(status: ServiceStatus, op_type: &str) -> CmdResult {
+-    SERVICE_MANAGER
+-        .handle_service_status(status)
+-        .await
+-        .map_err(|e| format!("{op_type} Service failed: {e}").into())
++    #[cfg(feature = "verge-dev")]
++    {
++        let _ = (status, op_type);
++        return Err("Clash Verge Service operations are disabled in the isolated development build".into());
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        SERVICE_MANAGER
++            .handle_service_status(status)
++            .await
++            .map_err(|e| format!("{op_type} Service failed: {e}").into())
++    }
+ }
+ 
+ #[tauri::command]
+diff --git a/src-tauri/src/config/clash.rs b/src-tauri/src/config/clash.rs
+index 6e92503e121eb9646c25e49420c68225de0f9995..559e8d994d21f1a4ddcf23fb4d8be24b34f6ff34 100644
+--- a/src-tauri/src/config/clash.rs
++++ b/src-tauri/src/config/clash.rs
+@@ -232,10 +232,10 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(7897);
++            .unwrap_or(network::ports::DEFAULT_MIXED);
+ 
+         if port == 0 {
+-            port = 7897;
++            port = network::ports::DEFAULT_MIXED;
+         }
+ 
+         port
+@@ -249,9 +249,9 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(7898);
++            .unwrap_or(network::ports::DEFAULT_SOCKS);
+         if port == 0 {
+-            port = 7898;
++            port = network::ports::DEFAULT_SOCKS;
+         }
+         port
+     }
+@@ -264,9 +264,9 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(7899);
++            .unwrap_or(network::ports::DEFAULT_HTTP);
+         if port == 0 {
+-            port = 7899;
++            port = network::ports::DEFAULT_HTTP;
+         }
+         port
+     }
+@@ -287,7 +287,7 @@ impl IClashTemp {
+                 }
+                 None => None,
+             })
+-            .unwrap_or_else(|| "127.0.0.1:9097".into())
++            .unwrap_or_else(|| network::DEFAULT_EXTERNAL_CONTROLLER.into())
+     }
+ 
+     pub fn guard_external_controller(config: &Mapping) -> String {
+@@ -320,7 +320,7 @@ impl IClashTemp {
+                 }
+                 socket.to_string()
+             }
+-            Err(_) => "127.0.0.1:9097".into(),
++            Err(_) => network::DEFAULT_EXTERNAL_CONTROLLER.into(),
+         }
+     }
+ 
+diff --git a/src-tauri/src/config/verge.rs b/src-tauri/src/config/verge.rs
+index 4f8749eb22157acb95f7d1ff0503256e9e3c581e..0cf0480184d88f2385408a4b199f91a9d1ad3210 100644
+--- a/src-tauri/src/config/verge.rs
++++ b/src-tauri/src/config/verge.rs
+@@ -1,6 +1,7 @@
+ use crate::config::Config;
+ use crate::{
+     config::{DEFAULT_PAC, deserialize_encrypted, serialize_encrypted},
++    constants::network,
+     utils::{dirs, help},
+ };
+ use anyhow::Result;
+@@ -419,10 +420,10 @@ impl IVerge {
+             verge_tproxy_port: Some(7896),
+             #[cfg(target_os = "linux")]
+             verge_tproxy_enabled: Some(false),
+-            verge_mixed_port: Some(7897),
+-            verge_socks_port: Some(7898),
++            verge_mixed_port: Some(network::ports::DEFAULT_MIXED),
++            verge_socks_port: Some(network::ports::DEFAULT_SOCKS),
+             verge_socks_enabled: Some(false),
+-            verge_port: Some(7899),
++            verge_port: Some(network::ports::DEFAULT_HTTP),
+             verge_http_enabled: Some(false),
+             enable_proxy_guard: Some(false),
+             enable_bypass_check: Some(true),
+diff --git a/src-tauri/src/constants.rs b/src-tauri/src/constants.rs
+index 1ff4e1496b83f7e13ecfffa19a9829811dd72e1b..4f6d854b8f3230d4a81045e04c5d57f49ffbcd64 100644
+--- a/src-tauri/src/constants.rs
++++ b/src-tauri/src/constants.rs
+@@ -1,16 +1,28 @@
+ use std::time::Duration;
+ 
+ pub mod network {
++    #[cfg(not(feature = "verge-dev"))]
+     pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:9097";
++    #[cfg(feature = "verge-dev")]
++    pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:19097";
+ 
+     pub mod ports {
+         #[cfg(not(target_os = "windows"))]
+         pub const DEFAULT_REDIR: u16 = 7895;
+         #[cfg(target_os = "linux")]
+         pub const DEFAULT_TPROXY: u16 = 7896;
++        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_MIXED: u16 = 7897;
++        #[cfg(feature = "verge-dev")]
++        pub const DEFAULT_MIXED: u16 = 17897;
++        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_SOCKS: u16 = 7898;
++        #[cfg(feature = "verge-dev")]
++        pub const DEFAULT_SOCKS: u16 = 17898;
++        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_HTTP: u16 = 7899;
++        #[cfg(feature = "verge-dev")]
++        pub const DEFAULT_HTTP: u16 = 17899;
+ 
+         #[cfg(not(feature = "verge-dev"))]
+         pub const SINGLETON_SERVER: u16 = 33331;
+diff --git a/src-tauri/src/core/service.rs b/src-tauri/src/core/service.rs
+index 50c98e5ac54282f057cd627b9a2e8f17cc2dc415..f36188e4c3eb587995f9dcacff3af75dde47f357 100644
+--- a/src-tauri/src/core/service.rs
++++ b/src-tauri/src/core/service.rs
+@@ -551,17 +551,25 @@ pub(super) async fn stop_core_by_service() -> Result<()> {
+ 
+ /// 检查服务是否正在运行
+ pub async fn is_service_available() -> Result<()> {
+-    if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
+-        let verge = Config::verge().await;
+-        let verge_last = verge.latest_arc();
+-        let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
+-        if is_enable {
+-            logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
++    #[cfg(feature = "verge-dev")]
++    {
++        bail!("Clash Verge Service is disabled in the isolated development build");
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
++            let verge = Config::verge().await;
++            let verge_last = verge.latest_arc();
++            let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
++            if is_enable {
++                logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
++            }
++            return Err(e.into());
+         }
+-        return Err(e.into());
++        clash_verge_service_ipc::connect().await?;
++        Ok(())
+     }
+-    clash_verge_service_ipc::connect().await?;
+-    Ok(())
+ }
+ 
+ async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
+@@ -590,7 +598,15 @@ async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
+ }
+ 
+ pub fn is_service_ipc_path_exists() -> bool {
+-    Path::new(clash_verge_service_ipc::IPC_PATH).exists()
++    #[cfg(feature = "verge-dev")]
++    {
++        false
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        Path::new(clash_verge_service_ipc::IPC_PATH).exists()
++    }
+ }
+ 
+ impl ServiceManager {
+diff --git a/src-tauri/src/feat/config.rs b/src-tauri/src/feat/config.rs
+index ef7b49d8be1cf80ac88566be23a022dbed0a6757..69934807f0bf20b643c6bb7b36c013ed27b68e93 100644
+--- a/src-tauri/src/feat/config.rs
++++ b/src-tauri/src/feat/config.rs
+@@ -268,6 +268,11 @@ async fn process_terminated_flags(update_flags: UpdateFlags, patch: &IVerge) ->
+ }
+ 
+ pub async fn patch_verge(patch: &IVerge, not_save_file: bool) -> Result<()> {
++    #[cfg(feature = "verge-dev")]
++    if patch.enable_system_proxy.is_some() || patch.enable_tun_mode.is_some() {
++        anyhow::bail!("System Proxy and TUN changes are disabled in the isolated development build");
++    }
++
+     Config::verge().await.edit_draft(|d| d.patch_config(patch));
+ 
+     let update_flags = determine_update_flags(patch);
+diff --git a/src-tauri/src/feat/proxy.rs b/src-tauri/src/feat/proxy.rs
+index 1abcd9d838becb449e7ed0d0d01494dd84477dbe..d2a15358dcceb03c3efedddafd4630ac0f050e6c 100644
+--- a/src-tauri/src/feat/proxy.rs
++++ b/src-tauri/src/feat/proxy.rs
+@@ -77,7 +77,9 @@ pub async fn copy_clash_env() {
+         .unwrap_or_else(|| verge_cfg.proxy_host.as_deref().unwrap_or("127.0.0.1"));
+ 
+     let app_handle = handle::Handle::app_handle();
+-    let port = verge_cfg.verge_mixed_port.unwrap_or(7897);
++    let port = verge_cfg
++        .verge_mixed_port
++        .unwrap_or(crate::constants::network::ports::DEFAULT_MIXED);
+     let http_proxy = format!("http://{ip}:{port}");
+     let socks5_proxy = format!("socks5://{ip}:{port}");
+ 
+diff --git a/src-tauri/src/utils/dirs.rs b/src-tauri/src/utils/dirs.rs
+index 453f6365a4d20ae8278bb938c99813b22f67d593..e5993dfccbd50525bbd2fa60f46355f1e2e6a164 100644
+--- a/src-tauri/src/utils/dirs.rs
++++ b/src-tauri/src/utils/dirs.rs
+@@ -243,10 +243,15 @@ pub fn ipc_path() -> Result<PathBuf> {
+         .ok_or_else(|| anyhow::anyhow!("Failed to determine ipc path"))
+ }
+ 
+-#[cfg(target_os = "windows")]
++#[cfg(all(target_os = "windows", not(feature = "verge-dev")))]
+ pub fn ipc_path() -> Result<PathBuf> {
+     Ok(PathBuf::from(r"\\.\pipe\verge-mihomo"))
+ }
++
++#[cfg(all(target_os = "windows", feature = "verge-dev"))]
++pub fn ipc_path() -> Result<PathBuf> {
++    Ok(PathBuf::from(r"\\.\pipe\verge-mihomo-dev"))
++}
+ #[async_trait]
+ pub trait PathBufExec {
+     async fn remove_if_exists(&self) -> Result<()>;
+diff --git a/src-tauri/src/utils/resolve/mod.rs b/src-tauri/src/utils/resolve/mod.rs
+index 7022de7193e0c31da124f07454697a56987f5bb2..008ebad93ef3e39160d93688e36ae584b6c89e8c 100644
+--- a/src-tauri/src/utils/resolve/mod.rs
++++ b/src-tauri/src/utils/resolve/mod.rs
+@@ -189,9 +189,17 @@ pub(super) async fn init_verge_config_before_window() -> bool {
+ }
+ 
+ pub(super) async fn init_service_manager() {
+-    clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
+-    if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
+-        logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
++    #[cfg(feature = "verge-dev")]
++    {
++        return;
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
++        if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
++            logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
++        }
+     }
+ }
+ 
+@@ -200,11 +208,27 @@ pub(super) async fn init_core_manager() {
+ }
+ 
+ pub(super) async fn init_system_proxy() {
+-    logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
++    #[cfg(feature = "verge-dev")]
++    {
++        return;
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
++    }
+ }
+ 
+ pub(super) async fn init_system_proxy_guard() {
+-    sysopt::Sysopt::global().refresh_guard().await;
++    #[cfg(feature = "verge-dev")]
++    {
++        return;
++    }
++
++    #[cfg(not(feature = "verge-dev"))]
++    {
++        sysopt::Sysopt::global().refresh_guard().await;
++    }
+ }
+ 
+ pub(super) async fn refresh_tray_menu() {
+diff --git a/src-tauri/tauri.ci.conf.json b/src-tauri/tauri.ci.conf.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..55a99462c6a81dbcefce412ffef47e0d32846eea
+--- /dev/null
++++ b/src-tauri/tauri.ci.conf.json
+@@ -0,0 +1,5 @@
++{
++  "bundle": {
++    "createUpdaterArtifacts": false
++  }
++}
+diff --git a/src/assets/styles/custom-dashboard.scss b/src/assets/styles/custom-dashboard.scss
+new file mode 100644
+index 0000000000000000000000000000000000000000..555fcfdc7e6f70d263028cdbcd3b0c6c0eb2fac4
+--- /dev/null
++++ b/src/assets/styles/custom-dashboard.scss
+@@ -0,0 +1,261 @@
++.custom-dashboard {
++  --dashboard-surface: rgb(15 20 37 / 86%);
++  --dashboard-surface-strong: rgb(24 29 51 / 96%);
++  --dashboard-border: rgb(153 164 255 / 16%);
++  --dashboard-text: #f4f6ff;
++  --dashboard-muted: #a7aec9;
++  --dashboard-violet: #9a8cff;
++  --dashboard-cyan: #5ee7f7;
++  --dashboard-mint: #72efc0;
++  --dashboard-amber: #ffc76b;
++
++  min-height: 100%;
++  padding: 4px;
++  color: var(--dashboard-text);
++  background:
++    radial-gradient(circle at 6% 4%, rgb(133 105 255 / 27%), transparent 34%),
++    radial-gradient(circle at 96% 13%, rgb(42 223 234 / 18%), transparent 31%),
++    linear-gradient(135deg, #0b0e1b 0%, #11152a 45%, #0e1324 100%);
++
++  .MuiTypography-root {
++    color: inherit;
++  }
++
++  .MuiButton-root {
++    border-radius: 10px;
++    text-transform: none;
++    font-weight: 650;
++  }
++
++  .MuiButton-contained {
++    color: #111426;
++    background: linear-gradient(135deg, var(--dashboard-cyan), #a9b6ff);
++  }
++
++  .MuiButton-outlined {
++    color: var(--dashboard-text);
++    border-color: var(--dashboard-border);
++  }
++}
++
++.custom-dashboard__hero {
++  display: flex;
++  gap: 24px;
++  align-items: flex-end;
++  justify-content: space-between;
++  min-height: 190px;
++  padding: 30px;
++  margin-bottom: 14px;
++  overflow: hidden;
++  border: 1px solid var(--dashboard-border);
++  border-radius: 22px;
++  background:
++    linear-gradient(102deg, rgb(23 22 54 / 93%), rgb(16 27 47 / 83%)),
++    radial-gradient(circle at 70% 0%, rgb(127 99 255 / 60%), transparent 43%);
++  box-shadow: 0 20px 60px rgb(0 0 0 / 20%);
++}
++
++.custom-dashboard__kicker,
++.dashboard-panel__eyebrow {
++  color: var(--dashboard-cyan) !important;
++  font-size: 0.68rem !important;
++  font-weight: 800 !important;
++  letter-spacing: 0.13em !important;
++}
++
++.custom-dashboard__status {
++  color: var(--dashboard-text) !important;
++  border: 1px solid rgb(114 239 192 / 35%) !important;
++  background: rgb(114 239 192 / 11%) !important;
++
++  .MuiChip-icon {
++    color: var(--dashboard-mint) !important;
++  }
++}
++
++.custom-dashboard__title {
++  max-width: 660px;
++  margin: 9px 0 7px !important;
++  font-size: clamp(1.8rem, 4vw, 2.75rem) !important;
++  font-weight: 750 !important;
++  letter-spacing: -0.035em !important;
++}
++
++.custom-dashboard__subtitle {
++  max-width: 650px;
++  color: var(--dashboard-muted) !important;
++  font-size: 0.9rem !important;
++  line-height: 1.6 !important;
++}
++
++.custom-dashboard__hero-actions {
++  flex-shrink: 0;
++}
++
++.dashboard-panel {
++  height: 100%;
++  padding: 18px;
++  border: 1px solid var(--dashboard-border);
++  border-radius: 18px;
++  background: linear-gradient(
++    145deg,
++    var(--dashboard-surface-strong),
++    var(--dashboard-surface)
++  );
++  box-shadow: 0 12px 30px rgb(0 0 0 / 15%);
++}
++
++.dashboard-panel--controls {
++  margin-bottom: 12px;
++}
++
++.dashboard-panel__heading {
++  min-height: 36px;
++  margin-bottom: 14px;
++}
++
++.dashboard-panel__icon,
++.dashboard-metric__icon {
++  display: grid;
++  width: 35px;
++  height: 35px;
++  place-items: center;
++  color: var(--dashboard-cyan);
++  border: 1px solid rgb(94 231 247 / 24%);
++  border-radius: 11px;
++  background: rgb(94 231 247 / 8%);
++}
++
++.dashboard-panel__title {
++  font-size: 1.05rem !important;
++  font-weight: 700 !important;
++}
++
++.dashboard-panel__body {
++  min-width: 0;
++
++  .MuiPaper-root {
++    color: var(--dashboard-text);
++    border-color: var(--dashboard-border);
++    background-color: rgb(8 12 26 / 50%);
++  }
++
++  .MuiTypography-colorTextSecondary,
++  .MuiTypography-root.MuiTypography-colorTextSecondary {
++    color: var(--dashboard-muted) !important;
++  }
++}
++
++.dashboard-metric {
++  display: flex;
++  gap: 11px;
++  align-items: center;
++  min-height: 82px;
++  padding: 13px;
++  border: 1px solid var(--dashboard-border);
++  border-radius: 13px;
++  background: rgb(5 8 20 / 36%);
++}
++
++.dashboard-metric__label {
++  color: var(--dashboard-muted) !important;
++  font-size: 0.72rem !important;
++  font-weight: 650 !important;
++  letter-spacing: 0.025em !important;
++}
++
++.dashboard-metric__value {
++  font-size: 1.15rem !important;
++  font-weight: 760 !important;
++}
++
++.dashboard-metric__unit {
++  color: var(--dashboard-muted) !important;
++  font-size: 0.75rem !important;
++}
++
++.dashboard-metric--violet .dashboard-metric__icon {
++  color: var(--dashboard-violet);
++  border-color: rgb(154 140 255 / 30%);
++  background: rgb(154 140 255 / 10%);
++}
++
++.dashboard-metric--cyan .dashboard-metric__icon {
++  color: var(--dashboard-cyan);
++}
++
++.dashboard-metric--mint .dashboard-metric__icon {
++  color: var(--dashboard-mint);
++  border-color: rgb(114 239 192 / 30%);
++  background: rgb(114 239 192 / 10%);
++}
++
++.dashboard-metric--amber .dashboard-metric__icon {
++  color: var(--dashboard-amber);
++  border-color: rgb(255 199 107 / 30%);
++  background: rgb(255 199 107 / 10%);
++}
++
++.dashboard-control-list {
++  display: grid;
++  gap: 8px;
++
++  .MuiBox-root {
++    padding-right: 0;
++  }
++}
++
++.dashboard-connections {
++  display: flex;
++  gap: 12px;
++  align-items: center;
++  min-height: 82px;
++  padding: 13px;
++  color: var(--dashboard-mint);
++  border: 1px solid rgb(114 239 192 / 24%);
++  border-radius: 13px;
++  background: rgb(114 239 192 / 7%);
++}
++
++.dashboard-connections__value {
++  font-size: 1.35rem !important;
++  font-weight: 760 !important;
++}
++
++.dashboard-connections__hint {
++  margin-left: auto !important;
++  color: var(--dashboard-muted) !important;
++  font-size: 0.76rem !important;
++  text-align: right;
++}
++
++.dashboard-shortcuts {
++  .MuiButton-root {
++    justify-content: flex-start;
++    padding: 12px;
++    color: var(--dashboard-text);
++    text-align: left;
++    border: 1px solid var(--dashboard-border);
++    background: rgb(5 8 20 / 36%);
++  }
++}
++
++@media (max-width: 640px) {
++  .custom-dashboard__hero {
++    align-items: stretch;
++    flex-direction: column;
++    padding: 22px;
++  }
++
++  .custom-dashboard__hero-actions {
++    width: 100%;
++
++    .MuiButton-root {
++      width: 100%;
++    }
++  }
++
++  .dashboard-connections__hint {
++    display: none;
++  }
++}
+diff --git a/src/components/dashboard/custom-dashboard.tsx b/src/components/dashboard/custom-dashboard.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a82c8dd7e12bd36dfe2c770c4067e22626edfee9
+--- /dev/null
++++ b/src/components/dashboard/custom-dashboard.tsx
+@@ -0,0 +1,387 @@
++import {
++  BoltRounded,
++  CloudQueueRounded,
++  DataUsageRounded,
++  HubRounded,
++  LinkRounded,
++  RouterRounded,
++  SettingsRounded,
++  SpeedRounded,
++  TravelExploreRounded,
++} from '@mui/icons-material'
++import {
++  Box,
++  Button,
++  Chip,
++  Grid,
++  Stack,
++  Typography,
++} from '@mui/material'
++import { type ReactNode, useMemo } from 'react'
++import { useTranslation } from 'react-i18next'
++import { useNavigate } from 'react-router'
++
++import { ClashModeCard } from '@/components/home/clash-mode-card'
++import { CurrentProxyCard } from '@/components/home/current-proxy-card'
++import { EnhancedTrafficStats } from '@/components/home/enhanced-traffic-stats'
++import { HomeProfileCard } from '@/components/home/home-profile-card'
++import { IpInfoCard } from '@/components/home/ip-info-card'
++import ProxyControlSwitches from '@/components/shared/proxy-control-switches'
++import { useConnectionSummaryData } from '@/hooks/use-connection-data'
++import { useProfiles } from '@/hooks/use-profiles'
++import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
++import { useSystemState } from '@/hooks/use-system-state'
++import { useTrafficData } from '@/hooks/use-traffic-data'
++import {
++  useClashConfigData,
++  useCoreDataStatus,
++  useProxiesData,
++} from '@/providers/app-data-context'
++import parseTraffic from '@/utils/parse-traffic'
++
++import '@/assets/styles/custom-dashboard.scss'
++
++interface DashboardPanelProps {
++  eyebrow?: string
++  title: string
++  icon?: ReactNode
++  action?: ReactNode
++  children: ReactNode
++  className?: string
++}
++
++const DashboardPanel = ({
++  eyebrow,
++  title,
++  icon,
++  action,
++  children,
++  className = '',
++}: DashboardPanelProps) => (
++  <Box className={`dashboard-panel ${className}`}>
++    <Stack
++      className="dashboard-panel__heading"
++      direction="row"
++      spacing={2}
++      sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}
++    >
++      <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center' }}>
++        {icon && <Box className="dashboard-panel__icon">{icon}</Box>}
++        <Box>
++          {eyebrow && (
++            <Typography className="dashboard-panel__eyebrow">
++              {eyebrow}
++            </Typography>
++          )}
++          <Typography className="dashboard-panel__title">{title}</Typography>
++        </Box>
++      </Stack>
++      {action}
++    </Stack>
++    <Box className="dashboard-panel__body">{children}</Box>
++  </Box>
++)
++
++interface LiveMetricProps {
++  label: string
++  value: string | number
++  unit?: string
++  icon: ReactNode
++  tone?: 'violet' | 'cyan' | 'mint' | 'amber'
++}
++
++const LiveMetric = ({
++  label,
++  value,
++  unit,
++  icon,
++  tone = 'violet',
++}: LiveMetricProps) => (
++  <Box className={`dashboard-metric dashboard-metric--${tone}`}>
++    <Box className="dashboard-metric__icon">{icon}</Box>
++    <Box>
++      <Typography className="dashboard-metric__label">{label}</Typography>
++      <Stack direction="row" spacing={0.5} sx={{ alignItems: 'baseline' }}>
++        <Typography className="dashboard-metric__value">{value}</Typography>
++        {unit && <Typography className="dashboard-metric__unit">{unit}</Typography>}
++      </Stack>
++    </Box>
++  </Box>
++)
++
++const proxyGroupCount = (proxies: unknown) => {
++  if (!proxies || typeof proxies !== 'object') return 0
++
++  return Object.values(proxies as Record<string, unknown>).filter(
++    (proxy) =>
++      typeof proxy === 'object' &&
++      proxy !== null &&
++      Array.isArray((proxy as { all?: unknown }).all),
++  ).length
++}
++
++/**
++ * The redesigned home screen deliberately delegates control logic to the
++ * established components and hooks.  It only arranges their real state into
++ * the dashboard visual language.
++ */
++export const CustomDashboard = () => {
++  const navigate = useNavigate()
++  const { t } = useTranslation()
++  const { current, mutateProfiles } = useProfiles()
++  const { proxies, isProxiesPending } = useProxiesData()
++  const { clashConfig, isClashConfigPending } = useClashConfigData()
++  const { isCoreDataPending } = useCoreDataStatus()
++  const { indicator: systemProxyEnabled } = useSystemProxyState()
++  const { isTunModeAvailable } = useSystemState()
++  const {
++    response: { data: traffic },
++  } = useTrafficData()
++  const {
++    response: { data: connectionSummary },
++  } = useConnectionSummaryData()
++
++  const [upload, uploadUnit] = parseTraffic(traffic?.up)
++  const [download, downloadUnit] = parseTraffic(traffic?.down)
++  const groups = useMemo(() => proxyGroupCount(proxies), [proxies])
++  const mode = clashConfig?.mode?.toUpperCase() ?? '--'
++  const coreStatus = clashConfig
++    ? 'Core online'
++    : isCoreDataPending || isClashConfigPending
++      ? 'Connecting to core'
++      : 'Core unavailable'
++  const profileName = current?.name || current?.file || 'No active profile'
++
++  return (
++    <Box className="custom-dashboard">
++      <Box className="custom-dashboard__hero">
++        <Box>
++          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
++            <Typography className="custom-dashboard__kicker">
++              CLASH VERGE CUSTOM
++            </Typography>
++            <Chip
++              className="custom-dashboard__status"
++              icon={<BoltRounded />}
++              label={coreStatus}
++              size="small"
++            />
++          </Stack>
++          <Typography component="h1" className="custom-dashboard__title">
++            Your network, at a glance.
++          </Typography>
++          <Typography className="custom-dashboard__subtitle">
++            Live Mihomo state is shown here. Settings and routing continue to
++            use the upstream Clash Verge implementation.
++          </Typography>
++        </Box>
++        <Stack
++          className="custom-dashboard__hero-actions"
++          direction={{ xs: 'column', sm: 'row' }}
++          spacing={1}
++        >
++          <Button
++            variant="outlined"
++            startIcon={<HubRounded />}
++            onClick={() => navigate('/proxies')}
++          >
++            Proxy groups
++          </Button>
++          <Button
++            variant="contained"
++            startIcon={<SettingsRounded />}
++            onClick={() => navigate('/settings')}
++          >
++            Settings
++          </Button>
++        </Stack>
++      </Box>
++
++      <Grid container spacing={1.5} className="custom-dashboard__grid">
++        <Grid size={{ xs: 12, md: 7 }}>
++          <DashboardPanel
++            eyebrow="ACTIVE SUBSCRIPTION"
++            title={profileName}
++            icon={<CloudQueueRounded />}
++            action={
++              <Button size="small" onClick={() => navigate('/profile')}>
++                Manage profiles
++              </Button>
++            }
++          >
++            <HomeProfileCard
++              current={current}
++              onProfileUpdated={mutateProfiles}
++            />
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={{ xs: 12, md: 5 }}>
++          <DashboardPanel
++            eyebrow="RUNTIME"
++            title="Network state"
++            icon={<RouterRounded />}
++          >
++            <Grid container spacing={1}>
++              <Grid size={6}>
++                <LiveMetric
++                  label="Clash mode"
++                  value={mode}
++                  icon={<RouterRounded />}
++                  tone="violet"
++                />
++              </Grid>
++              <Grid size={6}>
++                <LiveMetric
++                  label="Proxy groups"
++                  value={isProxiesPending ? '--' : groups}
++                  icon={<HubRounded />}
++                  tone="cyan"
++                />
++              </Grid>
++              <Grid size={6}>
++                <LiveMetric
++                  label="System Proxy"
++                  value={systemProxyEnabled ? 'ON' : 'OFF'}
++                  icon={<TravelExploreRounded />}
++                  tone={systemProxyEnabled ? 'mint' : 'amber'}
++                />
++              </Grid>
++              <Grid size={6}>
++                <LiveMetric
++                  label="TUN control"
++                  value={isTunModeAvailable ? 'READY' : 'UNAVAILABLE'}
++                  icon={<LinkRounded />}
++                  tone={isTunModeAvailable ? 'mint' : 'amber'}
++                />
++              </Grid>
++            </Grid>
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={{ xs: 12, lg: 7 }}>
++          <DashboardPanel
++            eyebrow="PROXY CONTROL"
++            title="Current proxy & node selection"
++            icon={<HubRounded />}
++            action={
++              <Button size="small" onClick={() => navigate('/proxies')}>
++                Open all nodes
++              </Button>
++            }
++          >
++            <CurrentProxyCard />
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={{ xs: 12, lg: 5 }}>
++          <DashboardPanel
++            eyebrow="SYSTEM ROUTING"
++            title="System Proxy & TUN"
++            icon={<TravelExploreRounded />}
++            className="dashboard-panel--controls"
++          >
++            <Box className="dashboard-control-list">
++              <ProxyControlSwitches
++                label={t('settings.sections.system.toggles.systemProxy')}
++              />
++              <ProxyControlSwitches
++                label={t('settings.sections.system.toggles.tunMode')}
++              />
++            </Box>
++          </DashboardPanel>
++
++          <DashboardPanel
++            eyebrow="ROUTING MODE"
++            title="Clash Mode"
++            icon={<RouterRounded />}
++            className="dashboard-panel--mode"
++          >
++            <ClashModeCard />
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={12}>
++          <DashboardPanel
++            eyebrow="REAL-TIME STREAM"
++            title="Traffic & connections"
++            icon={<DataUsageRounded />}
++            action={
++              <Button size="small" onClick={() => navigate('/connections')}>
++                Inspect connections
++              </Button>
++            }
++          >
++            <Grid container spacing={1} className="dashboard-quick-stats">
++              <Grid size={{ xs: 6, md: 3 }}>
++                <LiveMetric
++                  label="Upload"
++                  value={upload}
++                  unit={`${uploadUnit}/s`}
++                  icon={<SpeedRounded />}
++                  tone="violet"
++                />
++              </Grid>
++              <Grid size={{ xs: 6, md: 3 }}>
++                <LiveMetric
++                  label="Download"
++                  value={download}
++                  unit={`${downloadUnit}/s`}
++                  icon={<SpeedRounded />}
++                  tone="cyan"
++                />
++              </Grid>
++              <Grid size={{ xs: 12, md: 6 }}>
++                <Box className="dashboard-connections">
++                  <LinkRounded />
++                  <Box>
++                    <Typography className="dashboard-metric__label">
++                      Active connections
++                    </Typography>
++                    <Typography className="dashboard-connections__value">
++                      {connectionSummary?.activeConnectionCount ?? '--'}
++                    </Typography>
++                  </Box>
++                  <Typography className="dashboard-connections__hint">
++                    Live connection WebSocket
++                  </Typography>
++                </Box>
++              </Grid>
++            </Grid>
++            <EnhancedTrafficStats />
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={{ xs: 12, lg: 6 }}>
++          <DashboardPanel
++            eyebrow="NETWORK IDENTITY"
++            title="IP information"
++            icon={<TravelExploreRounded />}
++          >
++            <IpInfoCard />
++          </DashboardPanel>
++        </Grid>
++
++        <Grid size={{ xs: 12, lg: 6 }}>
++          <DashboardPanel
++            eyebrow="QUICK ACCESS"
++            title="Keep the full Clash Verge toolkit"
++            icon={<BoltRounded />}
++          >
++            <Stack className="dashboard-shortcuts" spacing={1}>
++              <Button onClick={() => navigate('/connections')}>
++                Connections — inspect and close real Mihomo connections
++              </Button>
++              <Button onClick={() => navigate('/rules')}>
++                Rules — inspect the active rule chain
++              </Button>
++              <Button onClick={() => navigate('/logs')}>
++                Logs — view Clash Verge and core diagnostics
++              </Button>
++            </Stack>
++          </DashboardPanel>
++        </Grid>
++      </Grid>
++    </Box>
++  )
++}
+diff --git a/src/components/shared/proxy-control-switches.tsx b/src/components/shared/proxy-control-switches.tsx
+index 50c75029985f423da194a2351789ff7162d66eff..27c3b717692e18f7488c433fcd5bb9550fd1d7e6 100644
+--- a/src/components/shared/proxy-control-switches.tsx
++++ b/src/components/shared/proxy-control-switches.tsx
+@@ -129,6 +129,10 @@ const ProxyControlSwitches = ({
+   onError,
+   noRightPadding = false,
+ }: ProxySwitchProps) => {
++  // `pnpm dev` runs the Rust backend with the `verge-dev` feature. That
++  // feature deliberately blocks host-wide proxy, TUN, and service operations
++  // so a dashboard session cannot affect an installed production application.
++  const isIsolatedDevRuntime = import.meta.env.DEV
+   const { t } = useTranslation()
+   const { verge, mutateVerge, patchVerge } = useVerge()
+   const { installServiceAndRestartCore } = useServiceInstaller()
+@@ -189,10 +193,15 @@ const ProxyControlSwitches = ({
+         <SwitchRow
+           label={t('settings.sections.proxyControl.fields.systemProxy')}
+           active={systemProxyIndicator}
+-          infoTitle={t('settings.sections.proxyControl.tooltips.systemProxy')}
++          infoTitle={
++            isIsolatedDevRuntime
++              ? 'System Proxy is locked while running the isolated development build.'
++              : t('settings.sections.proxyControl.tooltips.systemProxy')
++          }
+           onInfoClick={() => sysproxyRef.current?.open()}
+           onToggle={(value) => toggleSystemProxy(value)}
+           onError={onError}
++          disabled={isIsolatedDevRuntime}
+           highlight={systemProxyIndicator}
+         />
+       )}
+@@ -205,11 +214,11 @@ const ProxyControlSwitches = ({
+           onInfoClick={() => tunRef.current?.open()}
+           onToggle={handleTunToggle}
+           onError={onError}
+-          disabled={!isTunModeAvailable}
++          disabled={isIsolatedDevRuntime || !isTunModeAvailable}
+           highlight={enable_tun_mode || false}
+           extraIcons={
+             <>
+-              {!isTunModeAvailable && (
++              {!isIsolatedDevRuntime && !isTunModeAvailable && (
+                 <>
+                   <TooltipIcon
+                     title={t(
+diff --git a/src/pages/home.tsx b/src/pages/home.tsx
+index 5c79d739ef3278af6b2792c9d264244bb6c5c65d..beb74873bed732789978214b13a6e833e4f6d597 100644
+--- a/src/pages/home.tsx
++++ b/src/pages/home.tsx
+@@ -1,371 +1,33 @@
+ import {
+-  DnsOutlined,
+   HelpOutlineRounded,
+   HistoryEduOutlined,
+-  RouterOutlined,
+   SettingsOutlined,
+-  SpeedOutlined,
+ } from '@mui/icons-material'
+-import {
+-  Box,
+-  Button,
+-  Checkbox,
+-  Dialog,
+-  DialogActions,
+-  DialogContent,
+-  DialogTitle,
+-  FormControlLabel,
+-  FormGroup,
+-  Grid,
+-  IconButton,
+-  Skeleton,
+-  Tooltip,
+-} from '@mui/material'
++import { Box, IconButton, Tooltip } from '@mui/material'
+ import { useLockFn } from 'ahooks'
+-import { Suspense, lazy, useCallback, useMemo, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
++import { useNavigate } from 'react-router'
+ 
+ import { BasePage } from '@/components/base'
+-import { ClashModeCard } from '@/components/home/clash-mode-card'
+-import { CurrentProxyCard } from '@/components/home/current-proxy-card'
+-import { EnhancedCard } from '@/components/home/enhanced-card'
+-import { EnhancedTrafficStats } from '@/components/home/enhanced-traffic-stats'
+-import { HomeProfileCard } from '@/components/home/home-profile-card'
+-import { ProxyTunCard } from '@/components/home/proxy-tun-card'
+-import { useProfiles } from '@/hooks/use-profiles'
+-import { useVerge } from '@/hooks/use-verge'
++import { CustomDashboard } from '@/components/dashboard/custom-dashboard'
+ import { entry_lightweight_mode, openWebUrl } from '@/services/cmds'
+ 
+-const LazyTestCard = lazy(() =>
+-  import('@/components/home/test-card').then((module) => ({
+-    default: module.TestCard,
+-  })),
+-)
+-const LazyIpInfoCard = lazy(() =>
+-  import('@/components/home/ip-info-card').then((module) => ({
+-    default: module.IpInfoCard,
+-  })),
+-)
+-const LazyClashInfoCard = lazy(() =>
+-  import('@/components/home/clash-info-card').then((module) => ({
+-    default: module.ClashInfoCard,
+-  })),
+-)
+-const LazySystemInfoCard = lazy(() =>
+-  import('@/components/home/system-info-card').then((module) => ({
+-    default: module.SystemInfoCard,
+-  })),
+-)
+-
+-// 定义首页卡片设置接口
+-interface HomeCardsSettings {
+-  profile: boolean
+-  proxy: boolean
+-  network: boolean
+-  mode: boolean
+-  traffic: boolean
+-  info: boolean
+-  clashinfo: boolean
+-  systeminfo: boolean
+-  test: boolean
+-  ip: boolean
+-  [key: string]: boolean
+-}
+-
+-// 首页设置对话框组件接口
+-interface HomeSettingsDialogProps {
+-  open: boolean
+-  onClose: () => void
+-  homeCards: HomeCardsSettings
+-  onSave: (cards: HomeCardsSettings) => void
+-}
+-
+-const serializeCardFlags = (cards: HomeCardsSettings) =>
+-  Object.keys(cards)
+-    .sort()
+-    .map((key) => `${key}:${cards[key] ? 1 : 0}`)
+-    .join('|')
+-
+-// 首页设置对话框组件
+-const HomeSettingsDialog = ({
+-  open,
+-  onClose,
+-  homeCards,
+-  onSave,
+-}: HomeSettingsDialogProps) => {
+-  const { t } = useTranslation()
+-  const [cards, setCards] = useState<HomeCardsSettings>(homeCards)
+-  const { patchVerge } = useVerge()
+-
+-  const handleToggle = (key: string) => {
+-    setCards((prev: HomeCardsSettings) => ({
+-      ...prev,
+-      [key]: !prev[key],
+-    }))
+-  }
+-
+-  const handleSave = async () => {
+-    await patchVerge({ home_cards: cards })
+-    onSave(cards)
+-    onClose()
+-  }
+-
+-  return (
+-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+-      <DialogTitle>{t('home.page.settings.title')}</DialogTitle>
+-      <DialogContent>
+-        <FormGroup>
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.profile || false}
+-                onChange={() => handleToggle('profile')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.profile')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.proxy || false}
+-                onChange={() => handleToggle('proxy')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.currentProxy')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.network || false}
+-                onChange={() => handleToggle('network')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.network')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.mode || false}
+-                onChange={() => handleToggle('mode')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.proxyMode')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.traffic || false}
+-                onChange={() => handleToggle('traffic')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.traffic')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.test || false}
+-                onChange={() => handleToggle('test')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.tests')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.ip || false}
+-                onChange={() => handleToggle('ip')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.ip')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.clashinfo || false}
+-                onChange={() => handleToggle('clashinfo')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.clashInfo')}
+-          />
+-          <FormControlLabel
+-            control={
+-              <Checkbox
+-                checked={cards.systeminfo || false}
+-                onChange={() => handleToggle('systeminfo')}
+-              />
+-            }
+-            label={t('home.page.settings.cards.systemInfo')}
+-          />
+-        </FormGroup>
+-      </DialogContent>
+-      <DialogActions>
+-        <Button onClick={onClose}>{t('shared.actions.cancel')}</Button>
+-        <Button onClick={handleSave} color="primary">
+-          {t('shared.actions.save')}
+-        </Button>
+-      </DialogActions>
+-    </Dialog>
+-  )
+-}
+-
++/**
++ * Home remains a routed Clash Verge page. The custom dashboard is a React
++ * composition layer; it does not introduce a standalone browser page or a
++ * separate state model.
++ */
+ const HomePage = () => {
+   const { t } = useTranslation()
+-  const { verge } = useVerge()
+-  const { current, mutateProfiles } = useProfiles()
+-
+-  // 设置弹窗的状态
+-  const [settingsOpen, setSettingsOpen] = useState(false)
+-  const [localHomeCards, setLocalHomeCards] = useState<{
+-    value: HomeCardsSettings
+-    baseSignature: string
+-  } | null>(null)
+-
+-  // 卡片显示状态
+-  const defaultCards = useMemo<HomeCardsSettings>(
+-    () => ({
+-      info: false,
+-      profile: true,
+-      proxy: true,
+-      network: true,
+-      mode: true,
+-      traffic: true,
+-      clashinfo: true,
+-      systeminfo: true,
+-      test: true,
+-      ip: true,
+-    }),
+-    [],
+-  )
+-
+-  const vergeHomeCards = useMemo<HomeCardsSettings | null>(
+-    () => (verge?.home_cards as HomeCardsSettings | undefined) ?? null,
+-    [verge],
+-  )
+-
+-  const remoteHomeCards = useMemo<HomeCardsSettings>(
+-    () => vergeHomeCards ?? defaultCards,
+-    [defaultCards, vergeHomeCards],
++  const navigate = useNavigate()
++  const toGithubDoc = useLockFn(() =>
++    openWebUrl('https://clash-verge-rev.github.io/index.html'),
+   )
+ 
+-  const remoteSignature = useMemo(
+-    () => serializeCardFlags(remoteHomeCards),
+-    [remoteHomeCards],
+-  )
+-
+-  const pendingLocalCards = useMemo<HomeCardsSettings | null>(() => {
+-    if (!localHomeCards) return null
+-    return localHomeCards.baseSignature === remoteSignature
+-      ? localHomeCards.value
+-      : null
+-  }, [localHomeCards, remoteSignature])
+-
+-  const effectiveHomeCards = pendingLocalCards ?? remoteHomeCards
+-
+-  // 文档链接函数
+-  const toGithubDoc = useLockFn(() => {
+-    return openWebUrl('https://clash-verge-rev.github.io/index.html')
+-  })
+-
+-  // 新增：打开设置弹窗
+-  const openSettings = useCallback(() => {
+-    setSettingsOpen(true)
+-  }, [])
+-
+-  const renderCard = useCallback(
+-    (cardKey: string, component: React.ReactNode, size: number = 6) => {
+-      if (!effectiveHomeCards[cardKey]) return null
+-
+-      return (
+-        <Grid size={size} key={cardKey}>
+-          {component}
+-        </Grid>
+-      )
+-    },
+-    [effectiveHomeCards],
+-  )
+-
+-  const criticalCards = useMemo(
+-    () => [
+-      renderCard(
+-        'profile',
+-        <HomeProfileCard current={current} onProfileUpdated={mutateProfiles} />,
+-      ),
+-      renderCard('proxy', <CurrentProxyCard />),
+-      renderCard('network', <NetworkSettingsCard />),
+-      renderCard('mode', <ClashModeEnhancedCard />),
+-    ],
+-    [current, mutateProfiles, renderCard],
+-  )
+-
+-  // 新增：保存设置时用requestIdleCallback/setTimeout
+-  const handleSaveSettings = (newCards: HomeCardsSettings) => {
+-    if (window.requestIdleCallback) {
+-      window.requestIdleCallback(() =>
+-        setLocalHomeCards({
+-          value: newCards,
+-          baseSignature: remoteSignature,
+-        }),
+-      )
+-    } else {
+-      setTimeout(
+-        () =>
+-          setLocalHomeCards({
+-            value: newCards,
+-            baseSignature: remoteSignature,
+-          }),
+-        0,
+-      )
+-    }
+-  }
+-
+-  const nonCriticalCards = useMemo(
+-    () => [
+-      renderCard(
+-        'traffic',
+-        <EnhancedCard
+-          title={t('home.page.cards.trafficStats')}
+-          icon={<SpeedOutlined />}
+-          iconColor="secondary"
+-        >
+-          <EnhancedTrafficStats />
+-        </EnhancedCard>,
+-        12,
+-      ),
+-      renderCard(
+-        'test',
+-        <Suspense fallback={<Skeleton variant="rectangular" height={200} />}>
+-          <LazyTestCard />
+-        </Suspense>,
+-      ),
+-      renderCard(
+-        'ip',
+-        <Suspense fallback={<Skeleton variant="rectangular" height={200} />}>
+-          <LazyIpInfoCard />
+-        </Suspense>,
+-      ),
+-      renderCard(
+-        'clashinfo',
+-        <Suspense fallback={<Skeleton variant="rectangular" height={200} />}>
+-          <LazyClashInfoCard />
+-        </Suspense>,
+-      ),
+-      renderCard(
+-        'systeminfo',
+-        <Suspense fallback={<Skeleton variant="rectangular" height={200} />}>
+-          <LazySystemInfoCard />
+-        </Suspense>,
+-      ),
+-    ],
+-    [t, renderCard],
+-  )
+-  const dialogKey = useMemo(
+-    () => `${serializeCardFlags(effectiveHomeCards)}:${settingsOpen ? 1 : 0}`,
+-    [effectiveHomeCards, settingsOpen],
+-  )
+   return (
+     <BasePage
+       title={t('home.page.title')}
+-      contentStyle={{ padding: 2 }}
++      contentStyle={{ padding: 1.5 }}
+       header={
+         <Box sx={{ display: 'flex', alignItems: 'center' }}>
+           <Tooltip title={t('home.page.tooltips.lightweightMode')} arrow>
+@@ -383,59 +45,20 @@ const HomePage = () => {
+             </IconButton>
+           </Tooltip>
+           <Tooltip title={t('home.page.tooltips.settings')} arrow>
+-            <IconButton onClick={openSettings} size="small" color="inherit">
++            <IconButton
++              onClick={() => navigate('/settings')}
++              size="small"
++              color="inherit"
++            >
+               <SettingsOutlined />
+             </IconButton>
+           </Tooltip>
+         </Box>
+       }
+     >
+-      <Grid container spacing={1.5} columns={{ xs: 6, sm: 6, md: 12 }}>
+-        {criticalCards}
+-
+-        {nonCriticalCards}
+-      </Grid>
+-
+-      {/* 首页设置弹窗 */}
+-      <HomeSettingsDialog
+-        key={dialogKey}
+-        open={settingsOpen}
+-        onClose={() => setSettingsOpen(false)}
+-        homeCards={effectiveHomeCards}
+-        onSave={handleSaveSettings}
+-      />
++      <CustomDashboard />
+     </BasePage>
+   )
+ }
+ 
+-// 增强版网络设置卡片组件
+-const NetworkSettingsCard = () => {
+-  const { t } = useTranslation()
+-  return (
+-    <EnhancedCard
+-      title={t('home.page.cards.networkSettings')}
+-      icon={<DnsOutlined />}
+-      iconColor="primary"
+-      action={null}
+-    >
+-      <ProxyTunCard />
+-    </EnhancedCard>
+-  )
+-}
+-
+-// 增强版 Clash 模式卡片组件
+-const ClashModeEnhancedCard = () => {
+-  const { t } = useTranslation()
+-  return (
+-    <EnhancedCard
+-      title={t('home.page.cards.proxyMode')}
+-      icon={<RouterOutlined />}
+-      iconColor="info"
+-      action={null}
+-    >
+-      <ClashModeCard />
+-    </EnhancedCard>
+-  )
+-}
+-
+ export default HomePage
