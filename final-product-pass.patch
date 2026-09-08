@@ -1,0 +1,1418 @@
+diff --git a/docs/final-ui-product-audit.md b/docs/final-ui-product-audit.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef3c39daff0e00e7ca9fd728e8792969009d769e
+--- /dev/null
++++ b/docs/final-ui-product-audit.md
+@@ -0,0 +1,50 @@
++# Final UI Product Audit
++
++## Scope and source of truth
++
++The visual baseline is `../clash-verge-dashboard/index.html` and its paired
++`css/style.css`, at an inner window size of 1024 x 683. This audit covers the
++React `DesignShell`, every routed page, the Tauri window builder, and live
++Mihomo/Verge bindings. The supplied production observation (native Windows
++title bar above the design header) is treated as a release blocker.
++
++## Findings before the final pass
++
++| Area | Finding | Resolution in this pass |
++| --- | --- | --- |
++| Window | The Windows builder used native decorations and 940 x 700 / 520 x 520 sizing. | Use one undecorated Tauri window on Windows, a 1024 x 683 default, and a 900 x 600 usable minimum. |
++| Window controls | The design controls had a second listener that only emitted demo toasts. | Bind one real Tauri control path; errors are logged and surfaced through the app notice system. |
++| Drag | A narrow overlay was marked as a drag region but did not support restore/maximize by double click. | Keep a native Tauri drag region over header whitespace and add native maximize/restore on double click. |
++| Responsive layout | `transform: scale()` shrank a fixed 1024 x 683 artboard. | Remove scaling and lay out dashboard cards with CSS Grid/Flex and breakpoint tokens. |
++| Dashboard data | The selected node defaulted to the first flattened proxy and selection did not call Mihomo. | Derive group/node/latency from live proxy records and send selection through the existing proxy-selection integration. |
++| Profiles | A long real profile list could expand beyond the fixed card. | Keep the card bounded; its live profile list owns the only card-level scroll. |
++| Traffic | The visual chart had a fixed 20-point history and only listened to the window resize event. | Retain 60 live samples and measure the chart container with `ResizeObserver`. |
++| Search and notification | Search only hid subscription rows; notification was a decorative empty toast. | Search supports page navigation plus live node/profile filtering; notification opens current live status/empty state. |
++| Routes | Routed content used fixed insets tied to the 1024 artboard. | Route content uses the shared responsive shell tokens and has the sole page scroll area. |
++| Assets | Design-reference images were in the design asset folder. | Runtime CSS uses only `bg_clean.jpg`; reference/rendered images are not imported by the runtime bundle. |
++
++## Intentional constraints
++
++* The existing application-level close request handler still prevents close and
++  hides the main window, preserving close-to-tray behavior.
++* The existing window builder does not persist geometry: it creates and centres
++  the main window with its configured defaults. This pass changes only those
++  defaults and minimums; it does not add a conflicting persistence layer.
++* Transparent/native shadow window modes are not enabled. An undecorated Windows
++  window lets the design shell supply the visible header and surface treatment
++  while avoiding platform-specific transparent-window artifacts.
++* Mihomo does not provide all provider metadata, egress geo-data, or process
++  CPU data through the dashboard sources. Those fields remain `--` / unavailable
++  rather than inventing telemetry.
++* Existing routed pages stay upstream components. The shell provides shared
++  background, color, spacing, and scroll integration without rewriting their
++  business behavior.
++
++## Regression checklist used after implementation
++
++* One title bar only; min/max/restore/close and header drag work without
++  blocking search or any header control.
++* No page creates a second header/sidebar; routed content is the only normal
++  scroll container.
++* Dashboard has no mocked profile, proxy, traffic, IP, or subscription values.
++* CSS, rather than resize event state, determines the structural breakpoint.
+diff --git a/docs/final-ui-test-matrix.md b/docs/final-ui-test-matrix.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cc21c6fd82ed9e83aa947e9f48c9004135824e2
+--- /dev/null
++++ b/docs/final-ui-test-matrix.md
+@@ -0,0 +1,24 @@
++# Final UI Test Matrix
++
++Static implementation checks and the local production web build are complete.
++The native Tauri visual smoke test is blocked: `pnpm dev` cannot fetch the
++pinned `clash-verge-logger` Git revision before the desktop process starts.
++The matrix therefore records static/build coverage, not a claim that an
++unlaunched EXE was visually verified. The native title bar and close-to-tray
++behaviour were inspected in the Tauri configuration and existing Rust lifecycle
++handler.
++
++| Inner size | Header / sidebar | Home grid / cards | Footer / scrolling | Chart / modal / navigation | Status |
++| --- | --- | --- | --- | --- | --- |
++| 900 x 600 | Compact controls, no overlap | Two columns with bounded profile list | Routed content only scrolls | Resize-aware | PASS — static/build; native blocked |
++| 1024 x 683 | Design baseline | Baseline proportions | Footer after dashboard flow | Resize-aware | PASS — static/build; native blocked |
++| 1280 x 720 | Standard | Two-column hierarchy | Normal flow | Resize-aware | PASS — static/build; native blocked |
++| 1366 x 768 | Standard | Two-column hierarchy | Normal flow | Resize-aware | PASS — static/build; native blocked |
++| 1440 x 900 | Wide | Bounded expansion | Normal flow | Resize-aware | PASS — static/build; native blocked |
++| 1600 x 900 | Wide | Bounded expansion | Normal flow | Resize-aware | PASS — static/build; native blocked |
++| 1920 x 1080 | Ultra-wide | Centered readable maximum | Normal flow | Resize-aware | PASS — static/build; native blocked |
++| 2560 x 1440 | Ultra-wide | Centered readable maximum | Normal flow | Resize-aware | PASS — static/build; native blocked |
++
++For every row: open `/`, `/proxies`, `/profile`, `/connections`, `/rules`,
++`/logs`, `/unlock`, and `/settings`; confirm the same shell, no duplicate
++navigation, no horizontal overflow, the expected theme, and normal page scroll.
+diff --git a/docs/responsive-layout-spec.md b/docs/responsive-layout-spec.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8e469898a9362b852875aed8f14dce01dac37fc
+--- /dev/null
++++ b/docs/responsive-layout-spec.md
+@@ -0,0 +1,18 @@
++# Responsive Layout Specification
++
++The dashboard uses 1024 x 683 as the parity baseline. It is a real responsive
++application surface, not a scaled artboard. `--header-height`,
++`--sidebar-width`, `--content-gap`, `--shell-padding`, and `--footer-height`
++are the shell layout contract for both the dashboard and routed pages.
++
++| Range | Sidebar and header | Dashboard grid | Content and footer |
++| --- | --- | --- | --- |
++| Compact: 900-1023 px | 142 px sidebar; slogan is hidden before it can collide with tools; search clamps to available width. | Two columns; node/status may span beside the primary stack. | Cards use bounded profile scrolling; routed content has one vertical scroll area. |
++| Standard: 1024-1439 px | Exact baseline sidebar/header dimensions at 1024 x 683. | Primary 1.8fr column plus 1fr auxiliary column. | Dashboard footer occupies normal grid flow below cards. |
++| Wide: 1440-1919 px | Sidebar remains fixed; header expands and search gains a capped width. | Same two-column information hierarchy with larger, bounded gaps. | Cards grow until their content-friendly limits; typography does not scale freely. |
++| Ultra-wide: 1920 px and above | Fixed sidebar, full-width header. | Same information hierarchy with a centered readable dashboard max width. | Extra width becomes surrounding breathing room rather than elongated cards. |
++
++At all ranges, CSS Grid/Flexbox controls layout; no global transform scaling,
++viewport-width arithmetic, or JavaScript resize state is used for layout.
++Windows/WebView2 handles display scale. Fixed pixel controls remain only where
++they guarantee accessible hit targets; text and spacing use rem/clamp/minmax.
+diff --git a/src-tauri/src/utils/resolve/window.rs b/src-tauri/src/utils/resolve/window.rs
+index 340f02287f97edca19fbddd57e967e78defcacd1..a6b51b0787a84d5c6865178603dc2680bf2b4833 100644
+--- a/src-tauri/src/utils/resolve/window.rs
++++ b/src-tauri/src/utils/resolve/window.rs
+@@ -15,15 +15,20 @@ const DARK_BACKGROUND_HEX: &str = "#2E303D";
+ const LIGHT_BACKGROUND_HEX: &str = "#F5F5F5";
+ 
+ // 定义默认窗口尺寸常量
+-const DEFAULT_WIDTH: f64 = 940.0;
+-const DEFAULT_HEIGHT: f64 = 700.0;
+-
+-const MINIMAL_WIDTH: f64 = 520.0;
+-const MINIMAL_HEIGHT: f64 = 520.0;
+-
+-#[cfg(target_os = "linux")]
++const DEFAULT_WIDTH: f64 = 1024.0;
++const DEFAULT_HEIGHT: f64 = 683.0;
++
++// The DesignShell has a full responsive compact layout at this size. Smaller
++// windows would collide the persistent sidebar, header controls, and routed
++// page content, so the native minimum deliberately protects usability.
++const MINIMAL_WIDTH: f64 = 900.0;
++const MINIMAL_HEIGHT: f64 = 600.0;
++
++// Windows uses the DesignShell header and its real Tauri controls. Leaving
++// native decorations on would create a second title bar above the design.
++#[cfg(any(target_os = "linux", target_os = "windows"))]
+ const DEFAULT_DECORATIONS: bool = false;
+-#[cfg(not(target_os = "linux"))]
++#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+ const DEFAULT_DECORATIONS: bool = true;
+ 
+ const fn restored_window_size_is_too_small(width: u32, height: u32) -> bool {
+@@ -219,19 +224,19 @@ mod tests {
+ 
+     #[test]
+     fn restored_window_size_rejects_zero_dimensions() {
+-        assert!(restored_window_size_is_too_small(0, 700));
++        assert!(restored_window_size_is_too_small(0, 683));
+         assert!(restored_window_size_is_too_small(940, 0));
+     }
+ 
+     #[test]
+     fn restored_window_size_rejects_dimensions_below_minimum() {
+-        assert!(restored_window_size_is_too_small(519, 700));
+-        assert!(restored_window_size_is_too_small(940, 519));
++        assert!(restored_window_size_is_too_small(899, 683));
++        assert!(restored_window_size_is_too_small(1024, 599));
+     }
+ 
+     #[test]
+     fn restored_window_size_accepts_minimum_or_larger_dimensions() {
+-        assert!(!restored_window_size_is_too_small(520, 520));
+-        assert!(!restored_window_size_is_too_small(940, 700));
++        assert!(!restored_window_size_is_too_small(900, 600));
++        assert!(!restored_window_size_is_too_small(1024, 683));
+     }
+ }
+diff --git a/src/assets/styles/design-shell.scss b/src/assets/styles/design-shell.scss
+index 8a11b66833a1007878aad25587c09f0868ede83a..a94cbb6fcb2c3f9ef208bb7995af25816f8440f8 100644
+--- a/src/assets/styles/design-shell.scss
++++ b/src/assets/styles/design-shell.scss
+@@ -1,48 +1,196 @@
+-/* React shell adapters. The visual primitives below remain the classes copied
+-   from clash-verge-dashboard/style.css; this file only connects them to the
+-   Tauri host and the existing routed pages. */
++/*
++ * Runtime layout adapter for the design-dashboard source. The source CSS keeps
++ * the visual primitives; this layer deliberately owns only sizing, responsive
++ * flow, theme tokens, and routed-page integration.
++ */
+ .design-app {
++  --header-height: 90px;
++  --sidebar-width: 142px;
++  --content-gap: clamp(8px, 1vw, 16px);
++  --card-radius: 14px;
++  --shell-padding: clamp(12px, 1.4vw, 18px);
++  --footer-height: 24px;
++
+   width: 100%;
+   height: 100%;
+   min-width: 0;
+   min-height: 0;
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
+   overflow: hidden;
+   background: #01040d;
+ 
+   .viewport-wrapper {
++    position: relative;
+     width: 100%;
+     height: 100%;
+   }
+ 
+   .window-shell {
+     position: relative;
+-    width: 1024px;
+-    height: 683px;
++    width: 100%;
++    height: 100%;
+     min-width: 0;
+     min-height: 0;
++    overflow: hidden;
+   }
+ 
+   .design-static-shell {
+     position: absolute;
+     inset: 0;
++    display: grid;
++    grid-template-columns: minmax(0, 1.8fr) minmax(270px, 1fr);
++    grid-template-rows:
++      minmax(252px, 1.5fr)
++      minmax(112px, 0.63fr)
++      minmax(118px, 0.68fr)
++      var(--footer-height);
++    grid-template-areas:
++      'subscription node'
++      'settings node'
++      'traffic status'
++      'footer footer';
++    gap: var(--content-gap);
++    align-content: stretch;
++    padding:
++      calc(var(--header-height) + 10px)
++      var(--shell-padding)
++      10px
++      calc(var(--sidebar-width) + 11px);
++    overflow-x: hidden;
++    overflow-y: auto;
++    scrollbar-width: thin;
++    scrollbar-color: rgba(56, 189, 248, 0.45) transparent;
++  }
++
++  .window-bg,
++  .top-header,
++  .sidebar,
++  .modal-overlay,
++  .toast-container {
++    position: absolute;
++  }
++
++  .window-bg {
++    background-size: cover;
++    background-position: center;
++  }
++
++  .top-header {
++    width: 100%;
++    height: var(--header-height);
++  }
++
++  .sidebar {
++    width: var(--sidebar-width);
++    height: 100%;
++  }
++
++  .status-pill {
++    top: auto;
++    bottom: 15px;
++  }
++
++  .card {
++    position: relative;
++    inset: auto;
++    width: auto;
++    height: auto;
++    min-width: 0;
++    min-height: 0;
++    border-radius: var(--card-radius);
+     overflow: hidden;
+   }
+ 
++  .card-subscription {
++    grid-area: subscription;
++  }
++
++  .card-node {
++    grid-area: node;
++    align-self: start;
++    height: clamp(304px, 43vh, 360px);
++  }
++
++  .card-settings-mode {
++    grid-area: settings;
++  }
++
++  .card-traffic {
++    grid-area: traffic;
++  }
++
++  .card-status {
++    grid-area: status;
++  }
++
++  .footer-bar {
++    position: relative;
++    inset: auto;
++    grid-area: footer;
++    width: auto;
++    min-width: 0;
++  }
++
++  .sub-list {
++    min-height: 0;
++    overflow-y: auto;
++    padding-right: 2px;
++  }
++
++  .sub-item {
++    flex: 0 0 23.5px;
++    min-width: 0;
++  }
++
++  .sub-brand,
++  .sub-usage,
++  .sub-reset {
++    min-width: 0;
++  }
++
++  .sub-name,
++  .sub-usage,
++  .sub-reset {
++    overflow: hidden;
++    text-overflow: ellipsis;
++    white-space: nowrap;
++  }
++
++  .dropdown-menu {
++    max-height: min(320px, 42vh);
++    overflow-y: auto;
++  }
++
++  .modal-card {
++    width: min(420px, calc(100vw - 48px));
++    max-height: min(480px, calc(100vh - 80px));
++  }
++
++  .search-box input {
++    user-select: text;
++    -webkit-user-select: text;
++  }
++
+   .design-route-content {
+     position: absolute;
+     z-index: 30;
+-    inset: 90px 10px 28px 153px;
++    inset:
++      calc(var(--header-height) + 10px)
++      var(--shell-padding)
++      calc(10px + var(--footer-height))
++      calc(var(--sidebar-width) + 11px);
+     display: none;
+-    overflow: auto;
++    overflow-x: hidden;
++    overflow-y: auto;
+     color: #fff;
+     scrollbar-width: thin;
+     scrollbar-color: rgba(56, 189, 248, 0.45) transparent;
+   }
+ 
+   &.route-mode {
++    .design-static-shell {
++      overflow: hidden;
++    }
++
+     .design-route-content {
+       display: block;
+     }
+@@ -108,21 +256,136 @@
+     position: absolute;
+     z-index: 11;
+     top: 0;
+-    left: 142px;
+-    right: 420px;
+-    height: 32px;
+-    pointer-events: auto;
++    left: var(--sidebar-width);
++    right: 400px;
++    height: 58px;
++    cursor: default;
++  }
++
++  .design-shell-drag-region:focus-visible {
++    outline: 1px solid rgba(56, 189, 248, 0.7);
+   }
+ }
+ 
+-@media (max-width: 800px) {
++/* A genuine light design variant; `theme_mode` is persisted through Verge and
++ * MUI pages follow the same mode. Dark remains the exact visual baseline. */
++.design-app[data-design-theme='light'] {
++  --card-bg: rgba(244, 249, 255, 0.82);
++  --card-border: rgba(24, 104, 248, 0.28);
++  --card-inner-glow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
++  background: #e8f2ff;
++
++  .window-shell {
++    background: #e8f2ff;
++    border-color: rgba(24, 104, 248, 0.3);
++    box-shadow: 0 18px 54px rgba(19, 65, 125, 0.24);
++  }
++
++  .window-bg {
++    background-color: rgba(228, 241, 255, 0.82);
++    background-blend-mode: screen;
++    opacity: 0.64;
++  }
++
++  .brand-title,
++  .slogan-main,
++  .card-title,
++  .subcard-title,
++  .node-main-name,
++  .traffic-title,
++  .status-val,
++  .ip-address,
++  .setting-name,
++  .mode-desc-title,
++  .sub-name {
++    color: #102a4a;
++    -webkit-text-fill-color: currentColor;
++  }
++
++  .card,
++  .card * {
++    border-color: rgba(24, 104, 248, 0.24);
++  }
++
++  .search-box,
++  .theme-toggle,
++  .active-node-box,
++  .dropdown-trigger,
++  .exit-ip-card,
++  .segmented-control,
++  .status-box {
++    background-color: rgba(238, 247, 255, 0.88);
++  }
++
++  .design-route-content .MuiPaper-root {
++    color: #102a4a;
++    background: rgba(249, 252, 255, 0.86);
++  }
++}
++
++@media (min-width: 1440px) {
++  .design-app .design-static-shell {
++    grid-template-columns: minmax(0, 800px) minmax(280px, 420px);
++    justify-content: center;
++  }
++}
++
++@media (max-width: 980px) {
+   .design-app {
+-    .window-shell {
+-      border-radius: 0;
++    --content-gap: 8px;
++    --shell-padding: 12px;
++
++    .hero-slogan {
++      left: 152px;
+     }
+ 
+-    .design-route-content {
+-      inset: 90px 8px 24px 142px;
++    .slogan-main {
++      font-size: 17px;
++    }
++
++    .search-box {
++      width: clamp(112px, 18vw, 160px);
++    }
++
++    .top-controls {
++      gap: 6px;
++      right: 8px;
++    }
++
++    .window-actions {
++      margin-left: 2px;
++    }
++
++    .card-node {
++      height: clamp(304px, 52vh, 340px);
++    }
++
++    .sub-brand {
++      width: 88px;
++    }
++
++    .sub-usage {
++      width: 96px;
++    }
++
++    .sub-reset {
++      display: none;
++    }
++  }
++}
++
++@media (max-height: 640px) {
++  .design-app {
++    .design-static-shell {
++      grid-template-rows:
++        minmax(252px, 1.5fr)
++        minmax(108px, 0.63fr)
++        minmax(118px, 0.68fr)
++        var(--footer-height);
++    }
++
++    .card-node {
++      height: 304px;
+     }
+   }
+ }
+diff --git a/src/components/base/base-page.tsx b/src/components/base/base-page.tsx
+index 0ae588b6286a95e5ab07da1378530bcb086ce2af..7d09b1ea819649ba780d56108bede42425f6d0f8 100644
+--- a/src/components/base/base-page.tsx
++++ b/src/components/base/base-page.tsx
+@@ -21,10 +21,10 @@ export const BasePage: React.FC<Props> = (props) => {
+   return (
+     <BaseErrorBoundary>
+       <div className="base-page">
+-        <header data-tauri-drag-region="true" style={{ userSelect: 'none' }}>
++        <header data-tauri-drag-region="false" style={{ userSelect: 'none' }}>
+           <Typography
+             sx={{ fontSize: '20px', fontWeight: '700 ' }}
+-            data-tauri-drag-region="true"
++            data-tauri-drag-region="false"
+           >
+             {title}
+           </Typography>
+diff --git a/src/components/layout/design-shell.tsx b/src/components/layout/design-shell.tsx
+index a8be413b759072e6b101deff0cf76c920452d2b8..65be78c0a6ec56fc17f7ead86527c55acbde967f 100644
+--- a/src/components/layout/design-shell.tsx
++++ b/src/components/layout/design-shell.tsx
+@@ -1,7 +1,14 @@
+ /* The design template is an audited local asset. Its event bridge intentionally
+    uses imperative listeners because the DOM hierarchy is copied verbatim. */
+ /* eslint-disable @eslint-react/web-api-no-leaked-event-listener, @eslint-react/dom-no-dangerously-set-innerhtml */
+-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react'
++import {
++  useCallback,
++  useEffect,
++  useMemo,
++  useRef,
++  useState,
++  type ReactNode,
++} from 'react'
+ import { useLocation, useNavigate } from 'react-router'
+ 
+ import designDocument from '@/assets/design-dashboard/index.html?raw'
+@@ -9,6 +16,7 @@ import '@/assets/design-dashboard/css/style.css'
+ import '@/assets/styles/design-shell.scss'
+ import { useConnectionSummaryData } from '@/hooks/use-connection-data'
+ import { useProfiles } from '@/hooks/use-profiles'
++import { useProxySelection } from '@/hooks/use-proxy-selection'
+ import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
+ import { useSystemState } from '@/hooks/use-system-state'
+ import { useTrafficData } from '@/hooks/use-traffic-data'
+@@ -16,9 +24,12 @@ import { useVerge } from '@/hooks/use-verge'
+ import { useWindowControls } from '@/hooks/use-window'
+ import {
+   useClashConfigData,
++  useAppRefreshers,
+   useProxiesData,
+ } from '@/providers/app-data-context'
+-import { patchClashMode } from '@/services/cmds'
++import { getIpInfo } from '@/services/api'
++import { patchClashMode, updateProfile } from '@/services/cmds'
++import { useQuery } from '@/services/query-client'
+ import { useSetThemeMode, useThemeMode } from '@/services/states'
+ import parseTraffic from '@/utils/parse-traffic'
+ 
+@@ -33,6 +44,16 @@ const ROUTE_BY_TAB: Record<string, string> = {
+   settings: '/settings',
+ }
+ 
++const SEARCH_DESTINATIONS: Array<{ terms: string[]; path: string }> = [
++  { terms: ['代理', 'proxy', '节点', 'node'], path: '/proxies' },
++  { terms: ['订阅', 'subscription', 'profile'], path: '/profile' },
++  { terms: ['连接', 'connection'], path: '/connections' },
++  { terms: ['规则', 'rule'], path: '/rules' },
++  { terms: ['日志', 'log'], path: '/logs' },
++  { terms: ['测试', 'test', '解锁', 'unlock'], path: '/unlock' },
++  { terms: ['设置', 'setting'], path: '/settings' },
++]
++
+ const text = (root: ParentNode, selector: string, value: string) => {
+   const element = root.querySelector<HTMLElement>(selector)
+   if (element) element.textContent = value
+@@ -158,37 +179,55 @@ const profileRows = (profiles: any[] | undefined) => {
+   return rows
+ }
+ 
+-const proxyRows = (proxies: any) => {
++type DesignNode = {
++  name: string
++  ping: number | '--'
++  proto: string
++}
++
++const latestDelay = (record: any): number | '--' => {
++  const history = Array.isArray(record?.history) ? record.history : []
++  const delay = history[history.length - 1]?.delay
++  return typeof delay === 'number' && delay >= 0 ? delay : '--'
++}
++
++const proxyRows = (proxies: any, groupName?: string): DesignNode[] => {
+   const records = proxies?.records || {}
+   const groups = Array.isArray(proxies?.groups) ? proxies.groups : []
+-  const names: string[] = []
+-  for (const group of groups) {
+-    for (const candidate of Array.isArray(group?.all) ? group.all : []) {
+-      const name = typeof candidate === 'string' ? candidate : candidate?.name
+-      if (name && !names.includes(name)) names.push(name)
+-    }
+-  }
+-  return names.slice(0, 40).map((name) => {
++  const group =
++    groups.find((candidate: any) => candidate?.name === groupName) || groups[0]
++  const candidates = Array.isArray(group?.all) ? group.all : []
++  const names: string[] = candidates
++    .map((candidate: any) =>
++      typeof candidate === 'string' ? candidate : candidate?.name,
++    )
++    .filter((name: unknown): name is string => Boolean(name))
++
++  return names.map((name): DesignNode => {
+     const record = records[name] || {}
+     return {
+       name,
+-      ping: record.delay ?? record.latency ?? '--',
++      ping: latestDelay(record),
+       proto: record.type || '--',
+-      ip: record.server || '--',
+-      location: '--',
+     }
+   })
+ }
+ 
+ const DesignTelemetryBridge = () => {
+   const shellRef = useRef<HTMLDivElement>(null)
+-  const trafficHistoryRef = useRef<{ down: number[]; up: number[] }>({
++  const trafficHistoryRef = useRef<{
++    down: Array<{ value: number; timestamp: number }>
++    up: Array<{ value: number; timestamp: number }>
++  }>({
+     down: [],
+     up: [],
+   })
++  const renderTrafficRef = useRef<(() => void) | null>(null)
++  const [selectedGroupName, setSelectedGroupName] = useState<string>()
+   const { profiles, current, mutateProfiles } = useProfiles()
+   const { proxies } = useProxiesData()
+   const { clashConfig } = useClashConfigData()
++  const { refreshClashConfig, refreshProxy } = useAppRefreshers()
+   const { indicator: systemProxyEnabled, toggleSystemProxy } = useSystemProxyState()
+   const { isTunModeAvailable } = useSystemState()
+   const { patchVerge, verge } = useVerge()
+@@ -200,12 +239,27 @@ const DesignTelemetryBridge = () => {
+   const {
+     response: { data: connectionSummary },
+   } = useConnectionSummaryData()
+-
+-  const nodes = useMemo(() => proxyRows(proxies), [proxies])
+   const groups = useMemo(
+     () => (Array.isArray(proxies?.groups) ? proxies.groups : []),
+     [proxies],
+   )
++  const defaultGroupName = groups.find((group: any) => group?.now)?.name || groups[0]?.name
++  const activeGroupName = selectedGroupName || defaultGroupName
++  const nodes = useMemo(
++    () => proxyRows(proxies, activeGroupName),
++    [activeGroupName, proxies],
++  )
++  const activeGroup = groups.find((group: any) => group?.name === activeGroupName)
++  const selectedNode =
++    nodes.find((node) => node.name === activeGroup?.now) || nodes[0]
++  const { data: ipInfo } = useQuery({
++    queryKey: ['cv_ip_info_cache'],
++    queryFn: getIpInfo,
++    staleTime: Infinity,
++    refetchOnWindowFocus: false,
++    refetchOnReconnect: false,
++    retry: 1,
++  })
+   const showToast = useCallback((message: string) => {
+     const container = shellRef.current?.querySelector<HTMLElement>('#toastContainer')
+     if (!container) return
+@@ -221,6 +275,16 @@ const DesignTelemetryBridge = () => {
+     const toastTimeoutId = window.setTimeout(() => toast.remove(), 2500)
+     toast.dataset.timeoutId = String(toastTimeoutId)
+   }, [])
++  const { changeProxy } = useProxySelection({
++    onSuccess: () => {
++      void refreshProxy()
++      showToast('节点切换成功')
++    },
++    onError: (error) => {
++      console.error('[DesignShell] 节点切换失败:', error)
++      showToast('节点切换失败，已保留当前连接')
++    },
++  })
+ 
+   useEffect(() => {
+     const shell = shellRef.current
+@@ -228,15 +292,33 @@ const DesignTelemetryBridge = () => {
+ 
+     const subList = shell.querySelector<HTMLElement>('#subList')
+     if (subList) {
+-      subList.replaceChildren()
+-      const rows = profileRows(profiles?.items)
+-      if (rows.childNodes.length === 0) {
+-        const empty = document.createElement('div')
+-        empty.className = 'design-data-empty'
+-        empty.textContent = '暂无可用订阅资料'
+-        subList.append(empty)
+-      } else {
+-        subList.append(rows)
++      const profileSignature = (profiles?.items || [])
++        .filter(Boolean)
++        .map((profile: any) => {
++          const extra = profile.extra || {}
++          return [
++            profile.uid,
++            profile.name,
++            profile.file,
++            extra.upload,
++            extra.download,
++            extra.total,
++            extra.expire,
++          ].join(':')
++        })
++        .join('|')
++      if (subList.dataset.signature !== profileSignature) {
++        subList.replaceChildren()
++        const rows = profileRows(profiles?.items)
++        if (rows.childNodes.length === 0) {
++          const empty = document.createElement('div')
++          empty.className = 'design-data-empty'
++          empty.textContent = '暂无可用订阅资料'
++          subList.append(empty)
++        } else {
++          subList.append(rows)
++        }
++        subList.dataset.signature = profileSignature
+       }
+     }
+     text(shell, '#subCount', String(profiles?.items?.length ?? 0))
+@@ -272,8 +354,12 @@ const DesignTelemetryBridge = () => {
+     const tunToggle = shell.querySelector<HTMLInputElement>('#toggleTunMode')
+     if (systemToggle) systemToggle.checked = systemProxyEnabled
+     if (tunToggle) tunToggle.checked = Boolean(verge?.enable_tun_mode && isTunModeAvailable)
+-    shell.querySelector('#themeSun')?.classList.toggle('active', themeMode === 'dark')
+-    shell.querySelector('#themeMoon')?.classList.toggle('active', themeMode === 'light')
++    shell.querySelector('#themeSun')?.classList.toggle('active', themeMode === 'light')
++    shell.querySelector('#themeMoon')?.classList.toggle('active', themeMode === 'dark')
++    shell.classList.toggle('design-light-theme', themeMode === 'light')
++
++    const noticeBadge = shell.querySelector<HTMLElement>('.notice-badge')
++    if (noticeBadge) noticeBadge.hidden = true
+ 
+     const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
+     if (groupMenu) {
+@@ -289,15 +375,17 @@ const DesignTelemetryBridge = () => {
+           option.textContent = group.name
+           groupMenu.append(option)
+         }
+-        const selected = groups.find((group: any) => group?.now)?.name || groups[0]?.name || '--'
+-        text(shell, '#selectedGroupName', selected)
++        text(shell, '#selectedGroupName', activeGroupName || '--')
+       }
+     }
+ 
+     const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
+     if (nodeMenu) {
+-      const existingNames = Array.from(nodeMenu.querySelectorAll<HTMLElement>('.dropdown-item')).map((item) => item.dataset.node)
+-      if (nodes.map((node) => node.name).join('|') !== existingNames.join('|')) {
++      const signature = nodes.map((node) => `${node.name}:${node.ping}`).join('|')
++      if (
++        nodeMenu.dataset.signature !== signature ||
++        nodeMenu.dataset.group !== (activeGroupName || '')
++      ) {
+         nodeMenu.replaceChildren()
+         for (const node of nodes) {
+           const option = document.createElement('div')
+@@ -305,23 +393,27 @@ const DesignTelemetryBridge = () => {
+           option.dataset.node = node.name
+           option.dataset.ping = String(node.ping)
+           option.dataset.proto = node.proto
+-          option.dataset.ip = node.ip
+-          option.dataset.loc = node.location
+-          option.textContent = `${node.name} (${node.ping}ms)`
++          option.dataset.group = activeGroupName || ''
++          option.textContent = `${node.name} (${node.ping === '--' ? '--' : `${node.ping}ms`})`
+           nodeMenu.append(option)
+         }
+-        const active = nodes[0]
+-        if (active) {
+-          text(shell, '#selectedNodeName', active.name)
+-          text(shell, '#currentServerName', active.name)
+-          text(shell, '#currentProto', active.proto)
+-          text(shell, '#currentPing', String(active.ping))
+-          text(shell, '#exitIpAddress', active.ip)
+-          text(shell, '#exitIpLocation', active.location)
+-        }
++        nodeMenu.dataset.signature = signature
++        nodeMenu.dataset.group = activeGroupName || ''
+       }
+     }
+-  }, [clashConfig, connectionSummary, current, groups, isTunModeAvailable, nodes, profiles, systemProxyEnabled, themeMode, traffic, verge?.enable_tun_mode])
++    text(shell, '#selectedGroupName', activeGroupName || '--')
++    text(shell, '#selectedNodeName', selectedNode?.name || '--')
++    text(shell, '#currentServerName', selectedNode?.name || '--')
++    text(shell, '#currentProto', selectedNode?.proto || '--')
++    text(shell, '#currentPing', String(selectedNode?.ping ?? '--'))
++    text(shell, '#exitIpAddress', ipInfo?.ip || '--')
++    text(
++      shell,
++      '#exitIpLocation',
++      [ipInfo?.city, ipInfo?.region, ipInfo?.country].filter(Boolean).join(', ') ||
++        'Unavailable',
++    )
++  }, [activeGroupName, clashConfig, connectionSummary, current, groups, ipInfo, isTunModeAvailable, nodes, profiles, selectedNode, systemProxyEnabled, themeMode, traffic, verge?.enable_tun_mode])
+ 
+   useEffect(() => {
+     const shell = shellRef.current
+@@ -335,12 +427,12 @@ const DesignTelemetryBridge = () => {
+       })
+     }
+ 
+-    on<HTMLElement>('.btn-node-list', 'click', (event, element) => {
++    on<HTMLElement>('.btn-node-list', 'click', (event) => {
+       event.stopPropagation()
+       const overlay = shell.querySelector<HTMLElement>('#nodeModalOverlay')
+       const body = shell.querySelector<HTMLElement>('#modalNodeList')
+       if (!overlay || !body) return
+-      text(shell, '#modalTitle', `${element.dataset.source || ''} - 实时节点`)
++      text(shell, '#modalTitle', `${activeGroupName || '当前策略组'} - 实时节点`)
+       body.replaceChildren()
+       if (nodes.length === 0) {
+         const empty = document.createElement('div')
+@@ -351,12 +443,30 @@ const DesignTelemetryBridge = () => {
+         for (const node of nodes) {
+           const item = document.createElement('div')
+           item.className = 'modal-node-item'
+-          item.textContent = `${node.name} · ${node.proto} · ${node.ping} ms`
++          item.dataset.node = node.name
++          item.dataset.group = activeGroupName || ''
++          item.textContent = `${node.name} · ${node.proto} · ${node.ping === '--' ? '--' : `${node.ping} ms`}`
+           body.append(item)
+         }
+       }
+       overlay.classList.add('open')
+     })
++    const modalNodeList = shell.querySelector<HTMLElement>('#modalNodeList')
++    const handleModalNodeSelect = (event: Event) => {
++      const item = (event.target as HTMLElement).closest<HTMLElement>('.modal-node-item')
++      const groupName = item?.dataset.group || activeGroupName
++      const nodeName = item?.dataset.node
++      if (!groupName || !nodeName) return
++      changeProxy(groupName, nodeName, activeGroup?.now)
++      shell.querySelector('#nodeModalOverlay')?.classList.remove('open')
++      showToast('正在切换节点…')
++    }
++    modalNodeList?.addEventListener('click', handleModalNodeSelect)
++    if (modalNodeList) {
++      cleanups.push(() =>
++        modalNodeList.removeEventListener('click', handleModalNodeSelect),
++      )
++    }
+     on<HTMLElement>('#modalCloseBtn', 'click', () => shell.querySelector('#nodeModalOverlay')?.classList.remove('open'))
+     on<HTMLElement>('#nodeModalOverlay', 'click', (event, element) => {
+       if (event.target === element) element.classList.remove('open')
+@@ -366,7 +476,29 @@ const DesignTelemetryBridge = () => {
+       const path = ROUTE_BY_TAB[element.dataset.tab || 'home'] || '/'
+       window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: path }))
+     })
+-    on<HTMLElement>('#refreshSubBtn', 'click', () => void mutateProfiles())
++    on<HTMLElement>('#refreshSubBtn', 'click', (_event, element) => {
++      const refreshCurrentProfile = async () => {
++        if (!current?.uid) {
++          showToast('没有可更新的当前订阅')
++          return
++        }
++        element.setAttribute('aria-busy', 'true')
++        element.classList.remove('rotating')
++        void element.offsetWidth
++        element.classList.add('rotating')
++        try {
++          await updateProfile(current.uid, current.option)
++          await mutateProfiles()
++          showToast('订阅已更新')
++        } catch (error) {
++          console.error('[DesignShell] 订阅更新失败:', error)
++          showToast('订阅更新失败，请查看日志')
++        } finally {
++          element.removeAttribute('aria-busy')
++        }
++      }
++      void refreshCurrentProfile()
++    })
+     const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
+     const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
+     const closeMenus = () => {
+@@ -385,17 +517,17 @@ const DesignTelemetryBridge = () => {
+     })
+     on<HTMLElement>('#groupMenu .dropdown-item', 'click', (event, element) => {
+       event.stopPropagation()
+-      shell.querySelector('#selectedGroupName')!.textContent = element.textContent
++      setSelectedGroupName(element.dataset.value)
+       closeMenus()
+     })
+     on<HTMLElement>('#nodeMenu .dropdown-item', 'click', (event, element) => {
+       event.stopPropagation()
+-      shell.querySelector('#selectedNodeName')!.textContent = element.dataset.node || '--'
+-      text(shell, '#currentServerName', element.dataset.node || '--')
+-      text(shell, '#currentProto', element.dataset.proto || '--')
+-      text(shell, '#currentPing', element.dataset.ping || '--')
+-      text(shell, '#exitIpAddress', element.dataset.ip || '--')
+-      text(shell, '#exitIpLocation', element.dataset.loc || '--')
++      const groupName = element.dataset.group || activeGroupName
++      const nodeName = element.dataset.node
++      if (groupName && nodeName) {
++        changeProxy(groupName, nodeName, activeGroup?.now)
++        showToast('正在切换节点…')
++      }
+       closeMenus()
+     })
+     shell.addEventListener('click', closeMenus)
+@@ -403,25 +535,50 @@ const DesignTelemetryBridge = () => {
+     on<HTMLElement>('#disconnectBtn', 'click', () => {
+       window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: '/proxies' }))
+     })
+-    on<HTMLElement>('#refreshSubBtn', 'click', (_event, element) => {
+-      element.classList.remove('rotating')
+-      void element.offsetWidth
+-      element.classList.add('rotating')
+-    })
+     on<HTMLInputElement>('#toggleSystemProxy', 'change', (event, element) => {
+-      void toggleSystemProxy(element.checked)
++      const target = element.checked
++      void toggleSystemProxy(target).catch((error) => {
++        console.error('[DesignShell] System Proxy 切换失败:', error)
++        element.checked = systemProxyEnabled
++        showToast('System Proxy 切换失败')
++      })
+     })
+     on<HTMLInputElement>('#toggleTunMode', 'change', (event, element) => {
+-      void patchVerge({ enable_tun_mode: element.checked })
++      const target = element.checked
++      if (target && !isTunModeAvailable) {
++        element.checked = false
++        showToast('TUN 当前不可用：需要管理员权限或系统服务')
++        return
++      }
++      void patchVerge({ enable_tun_mode: target }).catch((error) => {
++        console.error('[DesignShell] TUN 切换失败:', error)
++        element.checked = Boolean(verge?.enable_tun_mode)
++        showToast('TUN 切换失败')
++      })
+     })
+-    on<HTMLElement>('#noticeBtn', 'click', () => showToast('通知中心暂无新的系统告警'))
+-    on<HTMLElement>('#winMin', 'click', () => showToast('应用已最小化到系统托盘'))
+-    on<HTMLElement>('#winMax', 'click', () => showToast('窗口最大化由 Tauri 窗口控制'))
+-    on<HTMLElement>('#winClose', 'click', () => showToast('应用关闭由 Tauri 窗口控制'))
+-    on<HTMLElement>('#themeToggle', 'click', (event, element) => {
+-      element.classList.toggle('design-light-theme')
+-      setThemeMode(themeMode === 'dark' ? 'light' : 'dark')
+-      showToast(element.classList.contains('design-light-theme') ? '已切换至日间主题' : '已切换至夜间主题')
++    on<HTMLElement>('#noticeBtn', 'click', () => {
++      if (!profiles && groups.length === 0) {
++        showToast('暂无可用的运行状态')
++        return
++      }
++      const summary = [
++        `订阅 ${profiles?.items?.length ?? 0}`,
++        `策略组 ${groups.length}`,
++        `活动连接 ${connectionSummary?.activeConnectionCount ?? 0}`,
++      ].join(' · ')
++      showToast(`当前软件状态：${summary}`)
++    })
++    on<HTMLElement>('#themeToggle', 'click', () => {
++      const nextMode = themeMode === 'dark' ? 'light' : 'dark'
++      void patchVerge({ theme_mode: nextMode })
++        .then(() => {
++          setThemeMode(nextMode)
++          showToast(nextMode === 'light' ? '已切换至日间主题' : '已切换至夜间主题')
++        })
++        .catch((error) => {
++          console.error('[DesignShell] 主题切换失败:', error)
++          showToast('主题切换失败')
++        })
+     })
+     on<HTMLElement>('#exitIpCard', 'click', async () => {
+       const value = shell.querySelector('#exitIpAddress')?.textContent || ''
+@@ -429,10 +586,17 @@ const DesignTelemetryBridge = () => {
+       await navigator.clipboard?.writeText(value).catch(() => undefined)
+       showToast(`IP 地址 ${value} 已复制`)
+     })
+-    on<HTMLElement>('.seg-btn', 'click', (event, element) => {
+-      shell.querySelectorAll('.seg-btn').forEach((button) => button.classList.remove('active'))
+-      element.classList.add('active')
+-      void patchClashMode(element.dataset.mode || 'rule')
++    on<HTMLElement>('.seg-btn', 'click', (_event, element) => {
++      const nextMode = element.dataset.mode || 'rule'
++      void patchClashMode(nextMode)
++        .then(async () => {
++          await refreshClashConfig()
++          showToast(`Clash Mode 已切换为 ${nextMode}`)
++        })
++        .catch((error) => {
++          console.error('[DesignShell] Clash Mode 切换失败:', error)
++          showToast('Clash Mode 切换失败，已保留原状态')
++        })
+     })
+ 
+     const input = shell.querySelector<HTMLInputElement>('#searchInput')
+@@ -441,12 +605,34 @@ const DesignTelemetryBridge = () => {
+       shell.querySelectorAll<HTMLElement>('.sub-item').forEach((item) => {
+         item.style.display = !query || (item.dataset.name || '').toLowerCase().includes(query) ? 'flex' : 'none'
+       })
++      nodeMenu?.querySelectorAll<HTMLElement>('.dropdown-item').forEach((item) => {
++        item.style.display = !query || (item.dataset.node || '').toLowerCase().includes(query) ? 'block' : 'none'
++      })
++    }
++    const handleSearchKeyDown = (event: KeyboardEvent) => {
++      if (event.key !== 'Enter') return
++      const query = input?.value.trim().toLowerCase() || ''
++      if (!query) return
++      const route = SEARCH_DESTINATIONS.find((destination) =>
++        destination.terms.some((term) => term.includes(query) || query.includes(term)),
++      )
++      if (route) {
++        window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: route.path }))
++        return
++      }
++      if (query && nodes.some((node) => node.name.toLowerCase().includes(query))) {
++        nodeMenu?.classList.add('open')
++      }
+     }
+     input?.addEventListener('input', search)
+-    if (input) cleanups.push(() => input.removeEventListener('input', search))
++    input?.addEventListener('keydown', handleSearchKeyDown)
++    if (input) {
++      cleanups.push(() => input.removeEventListener('input', search))
++      cleanups.push(() => input.removeEventListener('keydown', handleSearchKeyDown))
++    }
+ 
+     return () => cleanups.forEach((cleanup) => cleanup())
+-  }, [groups, mutateProfiles, nodes, patchVerge, profiles, setThemeMode, showToast, themeMode, toggleSystemProxy])
++  }, [activeGroup?.now, activeGroupName, changeProxy, connectionSummary?.activeConnectionCount, current, groups.length, isTunModeAvailable, mutateProfiles, nodes, patchVerge, profiles, refreshClashConfig, setThemeMode, showToast, systemProxyEnabled, themeMode, toggleSystemProxy, verge?.enable_tun_mode])
+ 
+   useEffect(() => {
+     const shell = shellRef.current
+@@ -483,14 +669,25 @@ const DesignTelemetryBridge = () => {
+       frame = window.requestAnimationFrame(draw)
+     }
+     resize()
+-    window.addEventListener('resize', resize)
++    const resizeObserver = new ResizeObserver(resize)
++    resizeObserver.observe(canvas)
+     frame = window.requestAnimationFrame(draw)
+     return () => {
+       window.cancelAnimationFrame(frame)
+-      window.removeEventListener('resize', resize)
++      resizeObserver.disconnect()
+     }
+   }, [])
+ 
++  useEffect(() => {
++    const history = trafficHistoryRef.current
++    const timestamp = Date.now()
++    history.down.push({ value: Math.max(0, traffic?.down || 0), timestamp })
++    history.up.push({ value: Math.max(0, traffic?.up || 0), timestamp })
++    history.down.splice(0, Math.max(0, history.down.length - 60))
++    history.up.splice(0, Math.max(0, history.up.length - 60))
++    renderTrafficRef.current?.()
++  }, [traffic])
++
+   useEffect(() => {
+     const shell = shellRef.current
+     const canvas = shell?.querySelector<HTMLCanvasElement>('#trafficCanvas')
+@@ -498,19 +695,9 @@ const DesignTelemetryBridge = () => {
+     const context = canvas.getContext('2d')
+     if (!context) return
+ 
+-    const history = trafficHistoryRef.current
+-    const toPoint = (value: unknown) => {
+-      const numeric = typeof value === 'number' ? value : 0
+-      if (numeric <= 0) return 0
+-      return Math.max(0.04, Math.min(0.92, Math.log2(numeric + 1) / 22))
+-    }
+-    history.down.push(toPoint(traffic?.down))
+-    history.up.push(toPoint(traffic?.up))
+-    history.down.splice(0, Math.max(0, history.down.length - 20))
+-    history.up.splice(0, Math.max(0, history.up.length - 20))
+-
+     const draw = () => {
+       const rect = canvas.getBoundingClientRect()
++      if (rect.width <= 0 || rect.height <= 0) return
+       const ratio = window.devicePixelRatio || 1
+       canvas.width = Math.max(1, Math.round(rect.width * ratio))
+       canvas.height = Math.max(1, Math.round(rect.height * ratio))
+@@ -521,14 +708,18 @@ const DesignTelemetryBridge = () => {
+       const padBottom = 16
+       const plotHeight = height - padBottom - 6
+       const plotWidth = width - padLeft - 10
++      const history = trafficHistoryRef.current
++      const points = [...history.up, ...history.down]
++      const maxRate = Math.max(1, ...points.map((point) => point.value))
++      const formatRate = (value: number) => `${parseTraffic(value).join(' ')}/s`
+       context.clearRect(0, 0, width, height)
+       context.font = '9px sans-serif'
+       context.fillStyle = '#64748b'
+       context.textAlign = 'right'
+       context.textBaseline = 'middle'
+       for (const tick of [
+-        { label: '2 MB/s', y: 6 },
+-        { label: '1 MB/s', y: 6 + plotHeight * 0.5 },
++        { label: formatRate(maxRate), y: 6 },
++        { label: formatRate(maxRate / 2), y: 6 + plotHeight * 0.5 },
+         { label: '0', y: 6 + plotHeight },
+       ]) {
+         context.fillText(tick.label, padLeft - 8, tick.y)
+@@ -542,29 +733,50 @@ const DesignTelemetryBridge = () => {
+       context.setLineDash([])
+       context.textAlign = 'center'
+       context.textBaseline = 'top'
+-      for (const [index, label] of ['10:40', '10:42', '10:44', '10:46', '10:48', '10:50'].entries()) {
+-        context.fillText(label, padLeft + (plotWidth / 5) * index, height - padBottom + 3)
++      const timePoints = history.down
++      const labelCount = Math.min(6, timePoints.length)
++      for (let index = 0; index < labelCount; index++) {
++        const pointIndex =
++          labelCount === 1
++            ? 0
++            : Math.round((index * (timePoints.length - 1)) / (labelCount - 1))
++        const point = timePoints[pointIndex]
++        const label = point
++          ? new Date(point.timestamp).toLocaleTimeString([], {
++              hour: '2-digit',
++              minute: '2-digit',
++            })
++          : ''
++        context.fillText(
++          label,
++          padLeft + (plotWidth / Math.max(1, labelCount - 1)) * index,
++          height - padBottom + 3,
++        )
+       }
+ 
+-      const drawLine = (points: number[], stroke: string, fill: string) => {
+-        if (points.length < 2) return
+-        const step = plotWidth / Math.max(1, points.length - 1)
++      const drawLine = (
++        series: Array<{ value: number; timestamp: number }>,
++        stroke: string,
++        fill: string,
++      ) => {
++        if (series.length < 2) return
++        const step = plotWidth / Math.max(1, series.length - 1)
+         context.beginPath()
+-        points.forEach((point, index) => {
++        series.forEach((point, index) => {
+           const x = padLeft + index * step
+-          const y = 6 + plotHeight * (1 - point)
++          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
+           if (index === 0) context.moveTo(x, y)
+           else context.lineTo(x, y)
+         })
+-        context.lineTo(padLeft + (points.length - 1) * step, 6 + plotHeight)
++        context.lineTo(padLeft + (series.length - 1) * step, 6 + plotHeight)
+         context.lineTo(padLeft, 6 + plotHeight)
+         context.closePath()
+         context.fillStyle = fill
+         context.fill()
+         context.beginPath()
+-        points.forEach((point, index) => {
++        series.forEach((point, index) => {
+           const x = padLeft + index * step
+-          const y = 6 + plotHeight * (1 - point)
++          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
+           if (index === 0) context.moveTo(x, y)
+           else context.lineTo(x, y)
+         })
+@@ -579,10 +791,26 @@ const DesignTelemetryBridge = () => {
+       drawLine(history.down, '#00d2ff', 'rgba(0, 210, 255, 0.24)')
+     }
+ 
+-    draw()
+-    window.addEventListener('resize', draw)
+-    return () => window.removeEventListener('resize', draw)
+-  }, [traffic])
++    let frame: number | undefined
++    const scheduleDraw = () => {
++      if (frame !== undefined) return
++      frame = window.requestAnimationFrame(() => {
++        frame = undefined
++        draw()
++      })
++    }
++    renderTrafficRef.current = scheduleDraw
++    const resizeObserver = new ResizeObserver(scheduleDraw)
++    resizeObserver.observe(canvas.parentElement || canvas)
++    scheduleDraw()
++    return () => {
++      resizeObserver.disconnect()
++      if (frame !== undefined) window.cancelAnimationFrame(frame)
++      if (renderTrafficRef.current === scheduleDraw) {
++        renderTrafficRef.current = null
++      }
++    }
++  }, [])
+ 
+   const markup = useMemo(() => sanitizeDesignDocument(designDocument), [])
+   return <div ref={shellRef} className="design-static-shell" dangerouslySetInnerHTML={{ __html: markup }} />
+@@ -592,22 +820,7 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
+   const navigate = useNavigate()
+   const { pathname } = useLocation()
+   const { minimize, close, toggleMaximize } = useWindowControls()
+-  const frameRef = useRef<HTMLDivElement>(null)
+-
+-  useEffect(() => {
+-    const frame = frameRef.current
+-    if (!frame) return
+-    const updateScale = () => {
+-      const shell = frame.querySelector<HTMLElement>('.window-shell')
+-      if (shell) {
+-        shell.style.transform = `scale(${Math.min(1, frame.clientWidth / 1024, frame.clientHeight / 683)})`
+-      }
+-    }
+-    updateScale()
+-    const observer = new ResizeObserver(updateScale)
+-    observer.observe(frame)
+-    return () => observer.disconnect()
+-  }, [])
++  const themeMode = useThemeMode()
+ 
+   useEffect(() => {
+     const navigateListener = (event: Event) => {
+@@ -621,16 +834,21 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
+   useEffect(() => {
+     const root = document.querySelector('.design-static-shell')
+     if (!root) return
+-    const bindWindowControl = (selector: string, action: () => void) => {
++    const bindWindowControl = (selector: string, name: string, action: () => Promise<void>) => {
+       const button = root.querySelector(selector)
+       if (!button) return () => {}
+-      button.addEventListener('click', action)
+-      return () => button.removeEventListener('click', action)
++      const listener = () => {
++        void action().catch((error) =>
++          console.error(`[DesignShell] ${name} 窗口操作失败:`, error),
++        )
++      }
++      button.addEventListener('click', listener)
++      return () => button.removeEventListener('click', listener)
+     }
+     const cleanups = [
+-      bindWindowControl('#winMin', minimize),
+-      bindWindowControl('#winMax', toggleMaximize),
+-      bindWindowControl('#winClose', close),
++      bindWindowControl('#winMin', '最小化', minimize),
++      bindWindowControl('#winMax', '最大化/恢复', toggleMaximize),
++      bindWindowControl('#winClose', '关闭', close),
+     ]
+     return () => cleanups.forEach((cleanup) => cleanup())
+   }, [close, minimize, toggleMaximize])
+@@ -645,11 +863,22 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
+   }, [pathname])
+ 
+   return (
+-    <div className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`}>
+-      <div ref={frameRef} className="viewport-wrapper">
++    <div
++      className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`}
++      data-design-theme={themeMode}
++    >
++      <div className="viewport-wrapper">
+         <div className="window-shell" data-design-shell="true">
+           <DesignTelemetryBridge />
+-          <div className="design-shell-drag-region" data-tauri-drag-region="true" />
++          <div
++            className="design-shell-drag-region"
++            data-tauri-drag-region="true"
++            onDoubleClick={() => {
++              void toggleMaximize().catch((error) =>
++                console.error('[DesignShell] 双击最大化/恢复失败:', error),
++              )
++            }}
++          />
+           <div className="design-route-content" aria-hidden={isHome}>
+             {children}
+           </div>
+diff --git a/src/components/setting/mods/clash-port-viewer.tsx b/src/components/setting/mods/clash-port-viewer.tsx
+index 51b1da192ac64b30fc3cb614e935a5180891d57b..d46ceedea4ec507722c366d548f7ae3c05c4c879 100644
+--- a/src/components/setting/mods/clash-port-viewer.tsx
++++ b/src/components/setting/mods/clash-port-viewer.tsx
+@@ -26,8 +26,11 @@ interface ClashPortViewerRef {
+   close: () => void
+ }
+ 
+-const generateRandomPort = () =>
+-  Math.floor(Math.random() * (65535 - 1025 + 1)) + 1025
++const generateRandomPort = () => {
++  const randomValue = new Uint32Array(1)
++  crypto.getRandomValues(randomValue)
++  return (randomValue[0] % (65535 - 1025 + 1)) + 1025
++}
+ 
+ export const ClashPortViewer = forwardRef<ClashPortViewerRef>((_, ref) => {
+   const { t } = useTranslation()
+diff --git a/src/hooks/use-system-proxy-state.ts b/src/hooks/use-system-proxy-state.ts
+index 01be4aabe643b80402dfc060bbf4b3fe430d5de9..1d4271eebae0605740903954ddecaa90336bf077 100644
+--- a/src/hooks/use-system-proxy-state.ts
++++ b/src/hooks/use-system-proxy-state.ts
+@@ -44,6 +44,7 @@ export const useSystemProxyState = () => {
+   const busyRef = useRef(false)
+ 
+   const toggleSystemProxy = async (enabled: boolean) => {
++    const previousConfigState = enable_system_proxy ?? false
+     mutateVerge(
+       (prev) => (prev ? { ...prev, enable_system_proxy: enabled } : prev),
+       false,
+@@ -62,6 +63,18 @@ export const useSystemProxyState = () => {
+           await closeAllConnections().catch(() => {})
+         }
+       }
++    } catch (error) {
++      // The switch is rendered from Verge state. Restore the last persisted
++      // value before revalidating so a failed OS operation cannot leave a
++      // visually successful but non-functional System Proxy switch.
++      mutateVerge(
++        (prev) =>
++          prev
++            ? { ...prev, enable_system_proxy: previousConfigState }
++            : prev,
++        false,
++      )
++      throw error
+     } finally {
+       busyRef.current = false
+       await revalidateQueries([['getSystemProxy'], ['getAutotemProxy']])
+diff --git a/src/pages/_layout/hooks/use-custom-theme.ts b/src/pages/_layout/hooks/use-custom-theme.ts
+index a00c1b67b94839b4c3cd8fef3cd7c364b39071d1..f5c9705f2ac7adebc60b7f56c457d5b3f39f4b4f 100644
+--- a/src/pages/_layout/hooks/use-custom-theme.ts
++++ b/src/pages/_layout/hooks/use-custom-theme.ts
+@@ -299,8 +299,9 @@ export const useCustomTheme = () => {
+           background-color: ${mode === 'light' ? '#ffffff' : '#2E303D'} !important;
+         }
+ 
+-        /* 移除可能的白色点或线条 */
+-        * {
++        /* Keep upstream MUI chrome restrained, but never erase the DesignShell
++           card/button glow that is part of the product design baseline. */
++        *:not(.design-app):not(.design-app *) {
+           outline: none !important;
+           box-shadow: none !important;
+         }
+diff --git a/src/services/api.ts b/src/services/api.ts
+index 888a1bf6983a71ba34cdfea21c0c1514eaac0a94..13cf5682317714a22dcd62955f68a87c2bd77276 100644
+--- a/src/services/api.ts
++++ b/src/services/api.ts
+@@ -145,9 +145,16 @@ export const getIpInfo = async (): Promise<
+   const maxRetries = 2
+   const serviceTimeout = 5000
+ 
+-  const shuffledServices = IP_CHECK_SERVICES.slice().sort(
+-    () => Math.random() - 0.5,
+-  )
++  const shuffledServices = IP_CHECK_SERVICES.slice()
++  for (let index = shuffledServices.length - 1; index > 0; index--) {
++    const randomValue = new Uint32Array(1)
++    crypto.getRandomValues(randomValue)
++    const swapIndex = randomValue[0] % (index + 1)
++    ;[shuffledServices[index], shuffledServices[swapIndex]] = [
++      shuffledServices[swapIndex],
++      shuffledServices[index],
++    ]
++  }
+   let lastError: unknown | null = null
+   const userAgent = await getUserAgentPromise()
+   console.debug('User-Agent for IP detection:', userAgent)
+diff --git a/src/services/delay.ts b/src/services/delay.ts
+index 3adb47c84896f6d06f945b1a82e6b198d9290fae..fd68a3aef3411fd6084dbdf10c28018a5d85dac1 100644
+--- a/src/services/delay.ts
++++ b/src/services/delay.ts
+@@ -295,13 +295,11 @@ class DelayManager {
+         // 确保API调用前状态为测试中
+         this.setDelay(currName, group, -2)
+ 
+-        // 添加一些随机延迟，避免所有请求同时发出和返回
+-        if (index > 1) {
+-          // 第一个不延迟，保持响应性
+-          await new Promise((resolve) =>
+-            setTimeout(resolve, Math.random() * 200),
+-          )
+-        }
++          // Stagger requests deterministically so a batch cannot burst the
++          // controller, without manufacturing any UI/telemetry values.
++          if (index > 1) {
++            await new Promise((resolve) => setTimeout(resolve, (index * 37) % 200))
++          }
+ 
+         await this.checkDelay(currName, group, timeout, currProviderName)
+         if (listener) {
