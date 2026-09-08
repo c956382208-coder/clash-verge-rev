@@ -1,7 +1,14 @@
 /* The design template is an audited local asset. Its event bridge intentionally
    uses imperative listeners because the DOM hierarchy is copied verbatim. */
 /* eslint-disable @eslint-react/web-api-no-leaked-event-listener, @eslint-react/dom-no-dangerously-set-innerhtml */
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
 import designDocument from '@/assets/design-dashboard/index.html?raw'
@@ -9,6 +16,7 @@ import '@/assets/design-dashboard/css/style.css'
 import '@/assets/styles/design-shell.scss'
 import { useConnectionSummaryData } from '@/hooks/use-connection-data'
 import { useProfiles } from '@/hooks/use-profiles'
+import { useProxySelection } from '@/hooks/use-proxy-selection'
 import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
 import { useSystemState } from '@/hooks/use-system-state'
 import { useTrafficData } from '@/hooks/use-traffic-data'
@@ -16,9 +24,12 @@ import { useVerge } from '@/hooks/use-verge'
 import { useWindowControls } from '@/hooks/use-window'
 import {
   useClashConfigData,
+  useAppRefreshers,
   useProxiesData,
 } from '@/providers/app-data-context'
-import { patchClashMode } from '@/services/cmds'
+import { getIpInfo } from '@/services/api'
+import { patchClashMode, updateProfile } from '@/services/cmds'
+import { useQuery } from '@/services/query-client'
 import { useSetThemeMode, useThemeMode } from '@/services/states'
 import parseTraffic from '@/utils/parse-traffic'
 
@@ -32,6 +43,16 @@ const ROUTE_BY_TAB: Record<string, string> = {
   test: '/unlock',
   settings: '/settings',
 }
+
+const SEARCH_DESTINATIONS: Array<{ terms: string[]; path: string }> = [
+  { terms: ['代理', 'proxy', '节点', 'node'], path: '/proxies' },
+  { terms: ['订阅', 'subscription', 'profile'], path: '/profile' },
+  { terms: ['连接', 'connection'], path: '/connections' },
+  { terms: ['规则', 'rule'], path: '/rules' },
+  { terms: ['日志', 'log'], path: '/logs' },
+  { terms: ['测试', 'test', '解锁', 'unlock'], path: '/unlock' },
+  { terms: ['设置', 'setting'], path: '/settings' },
+]
 
 const text = (root: ParentNode, selector: string, value: string) => {
   const element = root.querySelector<HTMLElement>(selector)
@@ -158,37 +179,55 @@ const profileRows = (profiles: any[] | undefined) => {
   return rows
 }
 
-const proxyRows = (proxies: any) => {
+type DesignNode = {
+  name: string
+  ping: number | '--'
+  proto: string
+}
+
+const latestDelay = (record: any): number | '--' => {
+  const history = Array.isArray(record?.history) ? record.history : []
+  const delay = history[history.length - 1]?.delay
+  return typeof delay === 'number' && delay >= 0 ? delay : '--'
+}
+
+const proxyRows = (proxies: any, groupName?: string): DesignNode[] => {
   const records = proxies?.records || {}
   const groups = Array.isArray(proxies?.groups) ? proxies.groups : []
-  const names: string[] = []
-  for (const group of groups) {
-    for (const candidate of Array.isArray(group?.all) ? group.all : []) {
-      const name = typeof candidate === 'string' ? candidate : candidate?.name
-      if (name && !names.includes(name)) names.push(name)
-    }
-  }
-  return names.slice(0, 40).map((name) => {
+  const group =
+    groups.find((candidate: any) => candidate?.name === groupName) || groups[0]
+  const candidates = Array.isArray(group?.all) ? group.all : []
+  const names: string[] = candidates
+    .map((candidate: any) =>
+      typeof candidate === 'string' ? candidate : candidate?.name,
+    )
+    .filter((name: unknown): name is string => Boolean(name))
+
+  return names.map((name): DesignNode => {
     const record = records[name] || {}
     return {
       name,
-      ping: record.delay ?? record.latency ?? '--',
+      ping: latestDelay(record),
       proto: record.type || '--',
-      ip: record.server || '--',
-      location: '--',
     }
   })
 }
 
 const DesignTelemetryBridge = () => {
   const shellRef = useRef<HTMLDivElement>(null)
-  const trafficHistoryRef = useRef<{ down: number[]; up: number[] }>({
+  const trafficHistoryRef = useRef<{
+    down: Array<{ value: number; timestamp: number }>
+    up: Array<{ value: number; timestamp: number }>
+  }>({
     down: [],
     up: [],
   })
+  const renderTrafficRef = useRef<(() => void) | null>(null)
+  const [selectedGroupName, setSelectedGroupName] = useState<string>()
   const { profiles, current, mutateProfiles } = useProfiles()
   const { proxies } = useProxiesData()
   const { clashConfig } = useClashConfigData()
+  const { refreshClashConfig, refreshProxy } = useAppRefreshers()
   const { indicator: systemProxyEnabled, toggleSystemProxy } = useSystemProxyState()
   const { isTunModeAvailable } = useSystemState()
   const { patchVerge, verge } = useVerge()
@@ -200,12 +239,27 @@ const DesignTelemetryBridge = () => {
   const {
     response: { data: connectionSummary },
   } = useConnectionSummaryData()
-
-  const nodes = useMemo(() => proxyRows(proxies), [proxies])
   const groups = useMemo(
     () => (Array.isArray(proxies?.groups) ? proxies.groups : []),
     [proxies],
   )
+  const defaultGroupName = groups.find((group: any) => group?.now)?.name || groups[0]?.name
+  const activeGroupName = selectedGroupName || defaultGroupName
+  const nodes = useMemo(
+    () => proxyRows(proxies, activeGroupName),
+    [activeGroupName, proxies],
+  )
+  const activeGroup = groups.find((group: any) => group?.name === activeGroupName)
+  const selectedNode =
+    nodes.find((node) => node.name === activeGroup?.now) || nodes[0]
+  const { data: ipInfo } = useQuery({
+    queryKey: ['cv_ip_info_cache'],
+    queryFn: getIpInfo,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
+  })
   const showToast = useCallback((message: string) => {
     const container = shellRef.current?.querySelector<HTMLElement>('#toastContainer')
     if (!container) return
@@ -221,6 +275,16 @@ const DesignTelemetryBridge = () => {
     const toastTimeoutId = window.setTimeout(() => toast.remove(), 2500)
     toast.dataset.timeoutId = String(toastTimeoutId)
   }, [])
+  const { changeProxy } = useProxySelection({
+    onSuccess: () => {
+      void refreshProxy()
+      showToast('节点切换成功')
+    },
+    onError: (error) => {
+      console.error('[DesignShell] 节点切换失败:', error)
+      showToast('节点切换失败，已保留当前连接')
+    },
+  })
 
   useEffect(() => {
     const shell = shellRef.current
@@ -228,15 +292,33 @@ const DesignTelemetryBridge = () => {
 
     const subList = shell.querySelector<HTMLElement>('#subList')
     if (subList) {
-      subList.replaceChildren()
-      const rows = profileRows(profiles?.items)
-      if (rows.childNodes.length === 0) {
-        const empty = document.createElement('div')
-        empty.className = 'design-data-empty'
-        empty.textContent = '暂无可用订阅资料'
-        subList.append(empty)
-      } else {
-        subList.append(rows)
+      const profileSignature = (profiles?.items || [])
+        .filter(Boolean)
+        .map((profile: any) => {
+          const extra = profile.extra || {}
+          return [
+            profile.uid,
+            profile.name,
+            profile.file,
+            extra.upload,
+            extra.download,
+            extra.total,
+            extra.expire,
+          ].join(':')
+        })
+        .join('|')
+      if (subList.dataset.signature !== profileSignature) {
+        subList.replaceChildren()
+        const rows = profileRows(profiles?.items)
+        if (rows.childNodes.length === 0) {
+          const empty = document.createElement('div')
+          empty.className = 'design-data-empty'
+          empty.textContent = '暂无可用订阅资料'
+          subList.append(empty)
+        } else {
+          subList.append(rows)
+        }
+        subList.dataset.signature = profileSignature
       }
     }
     text(shell, '#subCount', String(profiles?.items?.length ?? 0))
@@ -272,8 +354,12 @@ const DesignTelemetryBridge = () => {
     const tunToggle = shell.querySelector<HTMLInputElement>('#toggleTunMode')
     if (systemToggle) systemToggle.checked = systemProxyEnabled
     if (tunToggle) tunToggle.checked = Boolean(verge?.enable_tun_mode && isTunModeAvailable)
-    shell.querySelector('#themeSun')?.classList.toggle('active', themeMode === 'dark')
-    shell.querySelector('#themeMoon')?.classList.toggle('active', themeMode === 'light')
+    shell.querySelector('#themeSun')?.classList.toggle('active', themeMode === 'light')
+    shell.querySelector('#themeMoon')?.classList.toggle('active', themeMode === 'dark')
+    shell.classList.toggle('design-light-theme', themeMode === 'light')
+
+    const noticeBadge = shell.querySelector<HTMLElement>('.notice-badge')
+    if (noticeBadge) noticeBadge.hidden = true
 
     const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
     if (groupMenu) {
@@ -289,15 +375,17 @@ const DesignTelemetryBridge = () => {
           option.textContent = group.name
           groupMenu.append(option)
         }
-        const selected = groups.find((group: any) => group?.now)?.name || groups[0]?.name || '--'
-        text(shell, '#selectedGroupName', selected)
+        text(shell, '#selectedGroupName', activeGroupName || '--')
       }
     }
 
     const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
     if (nodeMenu) {
-      const existingNames = Array.from(nodeMenu.querySelectorAll<HTMLElement>('.dropdown-item')).map((item) => item.dataset.node)
-      if (nodes.map((node) => node.name).join('|') !== existingNames.join('|')) {
+      const signature = nodes.map((node) => `${node.name}:${node.ping}`).join('|')
+      if (
+        nodeMenu.dataset.signature !== signature ||
+        nodeMenu.dataset.group !== (activeGroupName || '')
+      ) {
         nodeMenu.replaceChildren()
         for (const node of nodes) {
           const option = document.createElement('div')
@@ -305,23 +393,27 @@ const DesignTelemetryBridge = () => {
           option.dataset.node = node.name
           option.dataset.ping = String(node.ping)
           option.dataset.proto = node.proto
-          option.dataset.ip = node.ip
-          option.dataset.loc = node.location
-          option.textContent = `${node.name} (${node.ping}ms)`
+          option.dataset.group = activeGroupName || ''
+          option.textContent = `${node.name} (${node.ping === '--' ? '--' : `${node.ping}ms`})`
           nodeMenu.append(option)
         }
-        const active = nodes[0]
-        if (active) {
-          text(shell, '#selectedNodeName', active.name)
-          text(shell, '#currentServerName', active.name)
-          text(shell, '#currentProto', active.proto)
-          text(shell, '#currentPing', String(active.ping))
-          text(shell, '#exitIpAddress', active.ip)
-          text(shell, '#exitIpLocation', active.location)
-        }
+        nodeMenu.dataset.signature = signature
+        nodeMenu.dataset.group = activeGroupName || ''
       }
     }
-  }, [clashConfig, connectionSummary, current, groups, isTunModeAvailable, nodes, profiles, systemProxyEnabled, themeMode, traffic, verge?.enable_tun_mode])
+    text(shell, '#selectedGroupName', activeGroupName || '--')
+    text(shell, '#selectedNodeName', selectedNode?.name || '--')
+    text(shell, '#currentServerName', selectedNode?.name || '--')
+    text(shell, '#currentProto', selectedNode?.proto || '--')
+    text(shell, '#currentPing', String(selectedNode?.ping ?? '--'))
+    text(shell, '#exitIpAddress', ipInfo?.ip || '--')
+    text(
+      shell,
+      '#exitIpLocation',
+      [ipInfo?.city, ipInfo?.region, ipInfo?.country].filter(Boolean).join(', ') ||
+        'Unavailable',
+    )
+  }, [activeGroupName, clashConfig, connectionSummary, current, groups, ipInfo, isTunModeAvailable, nodes, profiles, selectedNode, systemProxyEnabled, themeMode, traffic, verge?.enable_tun_mode])
 
   useEffect(() => {
     const shell = shellRef.current
@@ -335,12 +427,12 @@ const DesignTelemetryBridge = () => {
       })
     }
 
-    on<HTMLElement>('.btn-node-list', 'click', (event, element) => {
+    on<HTMLElement>('.btn-node-list', 'click', (event) => {
       event.stopPropagation()
       const overlay = shell.querySelector<HTMLElement>('#nodeModalOverlay')
       const body = shell.querySelector<HTMLElement>('#modalNodeList')
       if (!overlay || !body) return
-      text(shell, '#modalTitle', `${element.dataset.source || ''} - 实时节点`)
+      text(shell, '#modalTitle', `${activeGroupName || '当前策略组'} - 实时节点`)
       body.replaceChildren()
       if (nodes.length === 0) {
         const empty = document.createElement('div')
@@ -351,12 +443,30 @@ const DesignTelemetryBridge = () => {
         for (const node of nodes) {
           const item = document.createElement('div')
           item.className = 'modal-node-item'
-          item.textContent = `${node.name} · ${node.proto} · ${node.ping} ms`
+          item.dataset.node = node.name
+          item.dataset.group = activeGroupName || ''
+          item.textContent = `${node.name} · ${node.proto} · ${node.ping === '--' ? '--' : `${node.ping} ms`}`
           body.append(item)
         }
       }
       overlay.classList.add('open')
     })
+    const modalNodeList = shell.querySelector<HTMLElement>('#modalNodeList')
+    const handleModalNodeSelect = (event: Event) => {
+      const item = (event.target as HTMLElement).closest<HTMLElement>('.modal-node-item')
+      const groupName = item?.dataset.group || activeGroupName
+      const nodeName = item?.dataset.node
+      if (!groupName || !nodeName) return
+      changeProxy(groupName, nodeName, activeGroup?.now)
+      shell.querySelector('#nodeModalOverlay')?.classList.remove('open')
+      showToast('正在切换节点…')
+    }
+    modalNodeList?.addEventListener('click', handleModalNodeSelect)
+    if (modalNodeList) {
+      cleanups.push(() =>
+        modalNodeList.removeEventListener('click', handleModalNodeSelect),
+      )
+    }
     on<HTMLElement>('#modalCloseBtn', 'click', () => shell.querySelector('#nodeModalOverlay')?.classList.remove('open'))
     on<HTMLElement>('#nodeModalOverlay', 'click', (event, element) => {
       if (event.target === element) element.classList.remove('open')
@@ -366,7 +476,29 @@ const DesignTelemetryBridge = () => {
       const path = ROUTE_BY_TAB[element.dataset.tab || 'home'] || '/'
       window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: path }))
     })
-    on<HTMLElement>('#refreshSubBtn', 'click', () => void mutateProfiles())
+    on<HTMLElement>('#refreshSubBtn', 'click', (_event, element) => {
+      const refreshCurrentProfile = async () => {
+        if (!current?.uid) {
+          showToast('没有可更新的当前订阅')
+          return
+        }
+        element.setAttribute('aria-busy', 'true')
+        element.classList.remove('rotating')
+        void element.offsetWidth
+        element.classList.add('rotating')
+        try {
+          await updateProfile(current.uid, current.option)
+          await mutateProfiles()
+          showToast('订阅已更新')
+        } catch (error) {
+          console.error('[DesignShell] 订阅更新失败:', error)
+          showToast('订阅更新失败，请查看日志')
+        } finally {
+          element.removeAttribute('aria-busy')
+        }
+      }
+      void refreshCurrentProfile()
+    })
     const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
     const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
     const closeMenus = () => {
@@ -385,17 +517,17 @@ const DesignTelemetryBridge = () => {
     })
     on<HTMLElement>('#groupMenu .dropdown-item', 'click', (event, element) => {
       event.stopPropagation()
-      shell.querySelector('#selectedGroupName')!.textContent = element.textContent
+      setSelectedGroupName(element.dataset.value)
       closeMenus()
     })
     on<HTMLElement>('#nodeMenu .dropdown-item', 'click', (event, element) => {
       event.stopPropagation()
-      shell.querySelector('#selectedNodeName')!.textContent = element.dataset.node || '--'
-      text(shell, '#currentServerName', element.dataset.node || '--')
-      text(shell, '#currentProto', element.dataset.proto || '--')
-      text(shell, '#currentPing', element.dataset.ping || '--')
-      text(shell, '#exitIpAddress', element.dataset.ip || '--')
-      text(shell, '#exitIpLocation', element.dataset.loc || '--')
+      const groupName = element.dataset.group || activeGroupName
+      const nodeName = element.dataset.node
+      if (groupName && nodeName) {
+        changeProxy(groupName, nodeName, activeGroup?.now)
+        showToast('正在切换节点…')
+      }
       closeMenus()
     })
     shell.addEventListener('click', closeMenus)
@@ -403,25 +535,50 @@ const DesignTelemetryBridge = () => {
     on<HTMLElement>('#disconnectBtn', 'click', () => {
       window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: '/proxies' }))
     })
-    on<HTMLElement>('#refreshSubBtn', 'click', (_event, element) => {
-      element.classList.remove('rotating')
-      void element.offsetWidth
-      element.classList.add('rotating')
-    })
     on<HTMLInputElement>('#toggleSystemProxy', 'change', (event, element) => {
-      void toggleSystemProxy(element.checked)
+      const target = element.checked
+      void toggleSystemProxy(target).catch((error) => {
+        console.error('[DesignShell] System Proxy 切换失败:', error)
+        element.checked = systemProxyEnabled
+        showToast('System Proxy 切换失败')
+      })
     })
     on<HTMLInputElement>('#toggleTunMode', 'change', (event, element) => {
-      void patchVerge({ enable_tun_mode: element.checked })
+      const target = element.checked
+      if (target && !isTunModeAvailable) {
+        element.checked = false
+        showToast('TUN 当前不可用：需要管理员权限或系统服务')
+        return
+      }
+      void patchVerge({ enable_tun_mode: target }).catch((error) => {
+        console.error('[DesignShell] TUN 切换失败:', error)
+        element.checked = Boolean(verge?.enable_tun_mode)
+        showToast('TUN 切换失败')
+      })
     })
-    on<HTMLElement>('#noticeBtn', 'click', () => showToast('通知中心暂无新的系统告警'))
-    on<HTMLElement>('#winMin', 'click', () => showToast('应用已最小化到系统托盘'))
-    on<HTMLElement>('#winMax', 'click', () => showToast('窗口最大化由 Tauri 窗口控制'))
-    on<HTMLElement>('#winClose', 'click', () => showToast('应用关闭由 Tauri 窗口控制'))
-    on<HTMLElement>('#themeToggle', 'click', (event, element) => {
-      element.classList.toggle('design-light-theme')
-      setThemeMode(themeMode === 'dark' ? 'light' : 'dark')
-      showToast(element.classList.contains('design-light-theme') ? '已切换至日间主题' : '已切换至夜间主题')
+    on<HTMLElement>('#noticeBtn', 'click', () => {
+      if (!profiles && groups.length === 0) {
+        showToast('暂无可用的运行状态')
+        return
+      }
+      const summary = [
+        `订阅 ${profiles?.items?.length ?? 0}`,
+        `策略组 ${groups.length}`,
+        `活动连接 ${connectionSummary?.activeConnectionCount ?? 0}`,
+      ].join(' · ')
+      showToast(`当前软件状态：${summary}`)
+    })
+    on<HTMLElement>('#themeToggle', 'click', () => {
+      const nextMode = themeMode === 'dark' ? 'light' : 'dark'
+      void patchVerge({ theme_mode: nextMode })
+        .then(() => {
+          setThemeMode(nextMode)
+          showToast(nextMode === 'light' ? '已切换至日间主题' : '已切换至夜间主题')
+        })
+        .catch((error) => {
+          console.error('[DesignShell] 主题切换失败:', error)
+          showToast('主题切换失败')
+        })
     })
     on<HTMLElement>('#exitIpCard', 'click', async () => {
       const value = shell.querySelector('#exitIpAddress')?.textContent || ''
@@ -429,10 +586,17 @@ const DesignTelemetryBridge = () => {
       await navigator.clipboard?.writeText(value).catch(() => undefined)
       showToast(`IP 地址 ${value} 已复制`)
     })
-    on<HTMLElement>('.seg-btn', 'click', (event, element) => {
-      shell.querySelectorAll('.seg-btn').forEach((button) => button.classList.remove('active'))
-      element.classList.add('active')
-      void patchClashMode(element.dataset.mode || 'rule')
+    on<HTMLElement>('.seg-btn', 'click', (_event, element) => {
+      const nextMode = element.dataset.mode || 'rule'
+      void patchClashMode(nextMode)
+        .then(async () => {
+          await refreshClashConfig()
+          showToast(`Clash Mode 已切换为 ${nextMode}`)
+        })
+        .catch((error) => {
+          console.error('[DesignShell] Clash Mode 切换失败:', error)
+          showToast('Clash Mode 切换失败，已保留原状态')
+        })
     })
 
     const input = shell.querySelector<HTMLInputElement>('#searchInput')
@@ -441,12 +605,34 @@ const DesignTelemetryBridge = () => {
       shell.querySelectorAll<HTMLElement>('.sub-item').forEach((item) => {
         item.style.display = !query || (item.dataset.name || '').toLowerCase().includes(query) ? 'flex' : 'none'
       })
+      nodeMenu?.querySelectorAll<HTMLElement>('.dropdown-item').forEach((item) => {
+        item.style.display = !query || (item.dataset.node || '').toLowerCase().includes(query) ? 'block' : 'none'
+      })
+    }
+    const handleSearchKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter') return
+      const query = input?.value.trim().toLowerCase() || ''
+      if (!query) return
+      const route = SEARCH_DESTINATIONS.find((destination) =>
+        destination.terms.some((term) => term.includes(query) || query.includes(term)),
+      )
+      if (route) {
+        window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: route.path }))
+        return
+      }
+      if (query && nodes.some((node) => node.name.toLowerCase().includes(query))) {
+        nodeMenu?.classList.add('open')
+      }
     }
     input?.addEventListener('input', search)
-    if (input) cleanups.push(() => input.removeEventListener('input', search))
+    input?.addEventListener('keydown', handleSearchKeyDown)
+    if (input) {
+      cleanups.push(() => input.removeEventListener('input', search))
+      cleanups.push(() => input.removeEventListener('keydown', handleSearchKeyDown))
+    }
 
     return () => cleanups.forEach((cleanup) => cleanup())
-  }, [groups, mutateProfiles, nodes, patchVerge, profiles, setThemeMode, showToast, themeMode, toggleSystemProxy])
+  }, [activeGroup?.now, activeGroupName, changeProxy, connectionSummary?.activeConnectionCount, current, groups.length, isTunModeAvailable, mutateProfiles, nodes, patchVerge, profiles, refreshClashConfig, setThemeMode, showToast, systemProxyEnabled, themeMode, toggleSystemProxy, verge?.enable_tun_mode])
 
   useEffect(() => {
     const shell = shellRef.current
@@ -483,13 +669,24 @@ const DesignTelemetryBridge = () => {
       frame = window.requestAnimationFrame(draw)
     }
     resize()
-    window.addEventListener('resize', resize)
+    const resizeObserver = new ResizeObserver(resize)
+    resizeObserver.observe(canvas)
     frame = window.requestAnimationFrame(draw)
     return () => {
       window.cancelAnimationFrame(frame)
-      window.removeEventListener('resize', resize)
+      resizeObserver.disconnect()
     }
   }, [])
+
+  useEffect(() => {
+    const history = trafficHistoryRef.current
+    const timestamp = Date.now()
+    history.down.push({ value: Math.max(0, traffic?.down || 0), timestamp })
+    history.up.push({ value: Math.max(0, traffic?.up || 0), timestamp })
+    history.down.splice(0, Math.max(0, history.down.length - 60))
+    history.up.splice(0, Math.max(0, history.up.length - 60))
+    renderTrafficRef.current?.()
+  }, [traffic])
 
   useEffect(() => {
     const shell = shellRef.current
@@ -498,19 +695,9 @@ const DesignTelemetryBridge = () => {
     const context = canvas.getContext('2d')
     if (!context) return
 
-    const history = trafficHistoryRef.current
-    const toPoint = (value: unknown) => {
-      const numeric = typeof value === 'number' ? value : 0
-      if (numeric <= 0) return 0
-      return Math.max(0.04, Math.min(0.92, Math.log2(numeric + 1) / 22))
-    }
-    history.down.push(toPoint(traffic?.down))
-    history.up.push(toPoint(traffic?.up))
-    history.down.splice(0, Math.max(0, history.down.length - 20))
-    history.up.splice(0, Math.max(0, history.up.length - 20))
-
     const draw = () => {
       const rect = canvas.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
       const ratio = window.devicePixelRatio || 1
       canvas.width = Math.max(1, Math.round(rect.width * ratio))
       canvas.height = Math.max(1, Math.round(rect.height * ratio))
@@ -521,14 +708,18 @@ const DesignTelemetryBridge = () => {
       const padBottom = 16
       const plotHeight = height - padBottom - 6
       const plotWidth = width - padLeft - 10
+      const history = trafficHistoryRef.current
+      const points = [...history.up, ...history.down]
+      const maxRate = Math.max(1, ...points.map((point) => point.value))
+      const formatRate = (value: number) => `${parseTraffic(value).join(' ')}/s`
       context.clearRect(0, 0, width, height)
       context.font = '9px sans-serif'
       context.fillStyle = '#64748b'
       context.textAlign = 'right'
       context.textBaseline = 'middle'
       for (const tick of [
-        { label: '2 MB/s', y: 6 },
-        { label: '1 MB/s', y: 6 + plotHeight * 0.5 },
+        { label: formatRate(maxRate), y: 6 },
+        { label: formatRate(maxRate / 2), y: 6 + plotHeight * 0.5 },
         { label: '0', y: 6 + plotHeight },
       ]) {
         context.fillText(tick.label, padLeft - 8, tick.y)
@@ -542,29 +733,50 @@ const DesignTelemetryBridge = () => {
       context.setLineDash([])
       context.textAlign = 'center'
       context.textBaseline = 'top'
-      for (const [index, label] of ['10:40', '10:42', '10:44', '10:46', '10:48', '10:50'].entries()) {
-        context.fillText(label, padLeft + (plotWidth / 5) * index, height - padBottom + 3)
+      const timePoints = history.down
+      const labelCount = Math.min(6, timePoints.length)
+      for (let index = 0; index < labelCount; index++) {
+        const pointIndex =
+          labelCount === 1
+            ? 0
+            : Math.round((index * (timePoints.length - 1)) / (labelCount - 1))
+        const point = timePoints[pointIndex]
+        const label = point
+          ? new Date(point.timestamp).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : ''
+        context.fillText(
+          label,
+          padLeft + (plotWidth / Math.max(1, labelCount - 1)) * index,
+          height - padBottom + 3,
+        )
       }
 
-      const drawLine = (points: number[], stroke: string, fill: string) => {
-        if (points.length < 2) return
-        const step = plotWidth / Math.max(1, points.length - 1)
+      const drawLine = (
+        series: Array<{ value: number; timestamp: number }>,
+        stroke: string,
+        fill: string,
+      ) => {
+        if (series.length < 2) return
+        const step = plotWidth / Math.max(1, series.length - 1)
         context.beginPath()
-        points.forEach((point, index) => {
+        series.forEach((point, index) => {
           const x = padLeft + index * step
-          const y = 6 + plotHeight * (1 - point)
+          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
           if (index === 0) context.moveTo(x, y)
           else context.lineTo(x, y)
         })
-        context.lineTo(padLeft + (points.length - 1) * step, 6 + plotHeight)
+        context.lineTo(padLeft + (series.length - 1) * step, 6 + plotHeight)
         context.lineTo(padLeft, 6 + plotHeight)
         context.closePath()
         context.fillStyle = fill
         context.fill()
         context.beginPath()
-        points.forEach((point, index) => {
+        series.forEach((point, index) => {
           const x = padLeft + index * step
-          const y = 6 + plotHeight * (1 - point)
+          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
           if (index === 0) context.moveTo(x, y)
           else context.lineTo(x, y)
         })
@@ -579,10 +791,26 @@ const DesignTelemetryBridge = () => {
       drawLine(history.down, '#00d2ff', 'rgba(0, 210, 255, 0.24)')
     }
 
-    draw()
-    window.addEventListener('resize', draw)
-    return () => window.removeEventListener('resize', draw)
-  }, [traffic])
+    let frame: number | undefined
+    const scheduleDraw = () => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        draw()
+      })
+    }
+    renderTrafficRef.current = scheduleDraw
+    const resizeObserver = new ResizeObserver(scheduleDraw)
+    resizeObserver.observe(canvas.parentElement || canvas)
+    scheduleDraw()
+    return () => {
+      resizeObserver.disconnect()
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+      if (renderTrafficRef.current === scheduleDraw) {
+        renderTrafficRef.current = null
+      }
+    }
+  }, [])
 
   const markup = useMemo(() => sanitizeDesignDocument(designDocument), [])
   return <div ref={shellRef} className="design-static-shell" dangerouslySetInnerHTML={{ __html: markup }} />
@@ -592,22 +820,7 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { minimize, close, toggleMaximize } = useWindowControls()
-  const frameRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const frame = frameRef.current
-    if (!frame) return
-    const updateScale = () => {
-      const shell = frame.querySelector<HTMLElement>('.window-shell')
-      if (shell) {
-        shell.style.transform = `scale(${Math.min(1, frame.clientWidth / 1024, frame.clientHeight / 683)})`
-      }
-    }
-    updateScale()
-    const observer = new ResizeObserver(updateScale)
-    observer.observe(frame)
-    return () => observer.disconnect()
-  }, [])
+  const themeMode = useThemeMode()
 
   useEffect(() => {
     const navigateListener = (event: Event) => {
@@ -621,16 +834,21 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
   useEffect(() => {
     const root = document.querySelector('.design-static-shell')
     if (!root) return
-    const bindWindowControl = (selector: string, action: () => void) => {
+    const bindWindowControl = (selector: string, name: string, action: () => Promise<void>) => {
       const button = root.querySelector(selector)
       if (!button) return () => {}
-      button.addEventListener('click', action)
-      return () => button.removeEventListener('click', action)
+      const listener = () => {
+        void action().catch((error) =>
+          console.error(`[DesignShell] ${name} 窗口操作失败:`, error),
+        )
+      }
+      button.addEventListener('click', listener)
+      return () => button.removeEventListener('click', listener)
     }
     const cleanups = [
-      bindWindowControl('#winMin', minimize),
-      bindWindowControl('#winMax', toggleMaximize),
-      bindWindowControl('#winClose', close),
+      bindWindowControl('#winMin', '最小化', minimize),
+      bindWindowControl('#winMax', '最大化/恢复', toggleMaximize),
+      bindWindowControl('#winClose', '关闭', close),
     ]
     return () => cleanups.forEach((cleanup) => cleanup())
   }, [close, minimize, toggleMaximize])
@@ -645,11 +863,22 @@ export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome:
   }, [pathname])
 
   return (
-    <div className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`}>
-      <div ref={frameRef} className="viewport-wrapper">
+    <div
+      className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`}
+      data-design-theme={themeMode}
+    >
+      <div className="viewport-wrapper">
         <div className="window-shell" data-design-shell="true">
           <DesignTelemetryBridge />
-          <div className="design-shell-drag-region" data-tauri-drag-region="true" />
+          <div
+            className="design-shell-drag-region"
+            data-tauri-drag-region="true"
+            onDoubleClick={() => {
+              void toggleMaximize().catch((error) =>
+                console.error('[DesignShell] 双击最大化/恢复失败:', error),
+              )
+            }}
+          />
           <div className="design-route-content" aria-hidden={isHome}>
             {children}
           </div>

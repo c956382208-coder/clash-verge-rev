@@ -15,15 +15,20 @@ const DARK_BACKGROUND_HEX: &str = "#2E303D";
 const LIGHT_BACKGROUND_HEX: &str = "#F5F5F5";
 
 // 定义默认窗口尺寸常量
-const DEFAULT_WIDTH: f64 = 940.0;
-const DEFAULT_HEIGHT: f64 = 700.0;
+const DEFAULT_WIDTH: f64 = 1024.0;
+const DEFAULT_HEIGHT: f64 = 683.0;
 
-const MINIMAL_WIDTH: f64 = 520.0;
-const MINIMAL_HEIGHT: f64 = 520.0;
+// The DesignShell has a full responsive compact layout at this size. Smaller
+// windows would collide the persistent sidebar, header controls, and routed
+// page content, so the native minimum deliberately protects usability.
+const MINIMAL_WIDTH: f64 = 900.0;
+const MINIMAL_HEIGHT: f64 = 600.0;
 
-#[cfg(target_os = "linux")]
+// Windows uses the DesignShell header and its real Tauri controls. Leaving
+// native decorations on would create a second title bar above the design.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const DEFAULT_DECORATIONS: bool = false;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 const DEFAULT_DECORATIONS: bool = true;
 
 const fn restored_window_size_is_too_small(width: u32, height: u32) -> bool {
@@ -219,19 +224,19 @@ mod tests {
 
     #[test]
     fn restored_window_size_rejects_zero_dimensions() {
-        assert!(restored_window_size_is_too_small(0, 700));
+        assert!(restored_window_size_is_too_small(0, 683));
         assert!(restored_window_size_is_too_small(940, 0));
     }
 
     #[test]
     fn restored_window_size_rejects_dimensions_below_minimum() {
-        assert!(restored_window_size_is_too_small(519, 700));
-        assert!(restored_window_size_is_too_small(940, 519));
+        assert!(restored_window_size_is_too_small(899, 683));
+        assert!(restored_window_size_is_too_small(1024, 599));
     }
 
     #[test]
     fn restored_window_size_accepts_minimum_or_larger_dimensions() {
-        assert!(!restored_window_size_is_too_small(520, 520));
-        assert!(!restored_window_size_is_too_small(940, 700));
+        assert!(!restored_window_size_is_too_small(900, 600));
+        assert!(!restored_window_size_is_too_small(1024, 683));
     }
 }

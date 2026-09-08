@@ -26,8 +26,11 @@ interface ClashPortViewerRef {
   close: () => void
 }
 
-const generateRandomPort = () =>
-  Math.floor(Math.random() * (65535 - 1025 + 1)) + 1025
+const generateRandomPort = () => {
+  const randomValue = new Uint32Array(1)
+  crypto.getRandomValues(randomValue)
+  return (randomValue[0] % (65535 - 1025 + 1)) + 1025
+}
 
 export const ClashPortViewer = forwardRef<ClashPortViewerRef>((_, ref) => {
   const { t } = useTranslation()

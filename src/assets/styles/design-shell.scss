@@ -1,48 +1,196 @@
-/* React shell adapters. The visual primitives below remain the classes copied
-   from clash-verge-dashboard/style.css; this file only connects them to the
-   Tauri host and the existing routed pages. */
+/*
+ * Runtime layout adapter for the design-dashboard source. The source CSS keeps
+ * the visual primitives; this layer deliberately owns only sizing, responsive
+ * flow, theme tokens, and routed-page integration.
+ */
 .design-app {
+  --header-height: 90px;
+  --sidebar-width: 142px;
+  --content-gap: clamp(8px, 1vw, 16px);
+  --card-radius: 14px;
+  --shell-padding: clamp(12px, 1.4vw, 18px);
+  --footer-height: 24px;
+
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
   background: #01040d;
 
   .viewport-wrapper {
+    position: relative;
     width: 100%;
     height: 100%;
   }
 
   .window-shell {
     position: relative;
-    width: 1024px;
-    height: 683px;
+    width: 100%;
+    height: 100%;
     min-width: 0;
     min-height: 0;
+    overflow: hidden;
   }
 
   .design-static-shell {
     position: absolute;
     inset: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) minmax(270px, 1fr);
+    grid-template-rows:
+      minmax(252px, 1.5fr)
+      minmax(112px, 0.63fr)
+      minmax(118px, 0.68fr)
+      var(--footer-height);
+    grid-template-areas:
+      'subscription node'
+      'settings node'
+      'traffic status'
+      'footer footer';
+    gap: var(--content-gap);
+    align-content: stretch;
+    padding:
+      calc(var(--header-height) + 10px)
+      var(--shell-padding)
+      10px
+      calc(var(--sidebar-width) + 11px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(56, 189, 248, 0.45) transparent;
+  }
+
+  .window-bg,
+  .top-header,
+  .sidebar,
+  .modal-overlay,
+  .toast-container {
+    position: absolute;
+  }
+
+  .window-bg {
+    background-size: cover;
+    background-position: center;
+  }
+
+  .top-header {
+    width: 100%;
+    height: var(--header-height);
+  }
+
+  .sidebar {
+    width: var(--sidebar-width);
+    height: 100%;
+  }
+
+  .status-pill {
+    top: auto;
+    bottom: 15px;
+  }
+
+  .card {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    border-radius: var(--card-radius);
     overflow: hidden;
+  }
+
+  .card-subscription {
+    grid-area: subscription;
+  }
+
+  .card-node {
+    grid-area: node;
+    align-self: start;
+    height: clamp(304px, 43vh, 360px);
+  }
+
+  .card-settings-mode {
+    grid-area: settings;
+  }
+
+  .card-traffic {
+    grid-area: traffic;
+  }
+
+  .card-status {
+    grid-area: status;
+  }
+
+  .footer-bar {
+    position: relative;
+    inset: auto;
+    grid-area: footer;
+    width: auto;
+    min-width: 0;
+  }
+
+  .sub-list {
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .sub-item {
+    flex: 0 0 23.5px;
+    min-width: 0;
+  }
+
+  .sub-brand,
+  .sub-usage,
+  .sub-reset {
+    min-width: 0;
+  }
+
+  .sub-name,
+  .sub-usage,
+  .sub-reset {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dropdown-menu {
+    max-height: min(320px, 42vh);
+    overflow-y: auto;
+  }
+
+  .modal-card {
+    width: min(420px, calc(100vw - 48px));
+    max-height: min(480px, calc(100vh - 80px));
+  }
+
+  .search-box input {
+    user-select: text;
+    -webkit-user-select: text;
   }
 
   .design-route-content {
     position: absolute;
     z-index: 30;
-    inset: 90px 10px 28px 153px;
+    inset:
+      calc(var(--header-height) + 10px)
+      var(--shell-padding)
+      calc(10px + var(--footer-height))
+      calc(var(--sidebar-width) + 11px);
     display: none;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     color: #fff;
     scrollbar-width: thin;
     scrollbar-color: rgba(56, 189, 248, 0.45) transparent;
   }
 
   &.route-mode {
+    .design-static-shell {
+      overflow: hidden;
+    }
+
     .design-route-content {
       display: block;
     }
@@ -108,21 +256,136 @@
     position: absolute;
     z-index: 11;
     top: 0;
-    left: 142px;
-    right: 420px;
-    height: 32px;
-    pointer-events: auto;
+    left: var(--sidebar-width);
+    right: 400px;
+    height: 58px;
+    cursor: default;
+  }
+
+  .design-shell-drag-region:focus-visible {
+    outline: 1px solid rgba(56, 189, 248, 0.7);
   }
 }
 
-@media (max-width: 800px) {
+/* A genuine light design variant; `theme_mode` is persisted through Verge and
+ * MUI pages follow the same mode. Dark remains the exact visual baseline. */
+.design-app[data-design-theme='light'] {
+  --card-bg: rgba(244, 249, 255, 0.82);
+  --card-border: rgba(24, 104, 248, 0.28);
+  --card-inner-glow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  background: #e8f2ff;
+
+  .window-shell {
+    background: #e8f2ff;
+    border-color: rgba(24, 104, 248, 0.3);
+    box-shadow: 0 18px 54px rgba(19, 65, 125, 0.24);
+  }
+
+  .window-bg {
+    background-color: rgba(228, 241, 255, 0.82);
+    background-blend-mode: screen;
+    opacity: 0.64;
+  }
+
+  .brand-title,
+  .slogan-main,
+  .card-title,
+  .subcard-title,
+  .node-main-name,
+  .traffic-title,
+  .status-val,
+  .ip-address,
+  .setting-name,
+  .mode-desc-title,
+  .sub-name {
+    color: #102a4a;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .card,
+  .card * {
+    border-color: rgba(24, 104, 248, 0.24);
+  }
+
+  .search-box,
+  .theme-toggle,
+  .active-node-box,
+  .dropdown-trigger,
+  .exit-ip-card,
+  .segmented-control,
+  .status-box {
+    background-color: rgba(238, 247, 255, 0.88);
+  }
+
+  .design-route-content .MuiPaper-root {
+    color: #102a4a;
+    background: rgba(249, 252, 255, 0.86);
+  }
+}
+
+@media (min-width: 1440px) {
+  .design-app .design-static-shell {
+    grid-template-columns: minmax(0, 800px) minmax(280px, 420px);
+    justify-content: center;
+  }
+}
+
+@media (max-width: 980px) {
   .design-app {
-    .window-shell {
-      border-radius: 0;
+    --content-gap: 8px;
+    --shell-padding: 12px;
+
+    .hero-slogan {
+      left: 152px;
     }
 
-    .design-route-content {
-      inset: 90px 8px 24px 142px;
+    .slogan-main {
+      font-size: 17px;
+    }
+
+    .search-box {
+      width: clamp(112px, 18vw, 160px);
+    }
+
+    .top-controls {
+      gap: 6px;
+      right: 8px;
+    }
+
+    .window-actions {
+      margin-left: 2px;
+    }
+
+    .card-node {
+      height: clamp(304px, 52vh, 340px);
+    }
+
+    .sub-brand {
+      width: 88px;
+    }
+
+    .sub-usage {
+      width: 96px;
+    }
+
+    .sub-reset {
+      display: none;
+    }
+  }
+}
+
+@media (max-height: 640px) {
+  .design-app {
+    .design-static-shell {
+      grid-template-rows:
+        minmax(252px, 1.5fr)
+        minmax(108px, 0.63fr)
+        minmax(118px, 0.68fr)
+        var(--footer-height);
+    }
+
+    .card-node {
+      height: 304px;
     }
   }
 }

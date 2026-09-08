@@ -299,8 +299,9 @@ export const useCustomTheme = () => {
           background-color: ${mode === 'light' ? '#ffffff' : '#2E303D'} !important;
         }
 
-        /* 移除可能的白色点或线条 */
-        * {
+        /* Keep upstream MUI chrome restrained, but never erase the DesignShell
+           card/button glow that is part of the product design baseline. */
+        *:not(.design-app):not(.design-app *) {
           outline: none !important;
           box-shadow: none !important;
         }
