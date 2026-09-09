@@ -189,17 +189,9 @@ pub(super) async fn init_verge_config_before_window() -> bool {
 }
 
 pub(super) async fn init_service_manager() {
-    #[cfg(feature = "verge-dev")]
-    {
-        return;
-    }
-
-    #[cfg(not(feature = "verge-dev"))]
-    {
-        clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
-        if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
-            logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
-        }
+    clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
+    if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
+        logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
     }
 }
 
@@ -208,27 +200,11 @@ pub(super) async fn init_core_manager() {
 }
 
 pub(super) async fn init_system_proxy() {
-    #[cfg(feature = "verge-dev")]
-    {
-        return;
-    }
-
-    #[cfg(not(feature = "verge-dev"))]
-    {
-        logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
-    }
+    logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
 }
 
 pub(super) async fn init_system_proxy_guard() {
-    #[cfg(feature = "verge-dev")]
-    {
-        return;
-    }
-
-    #[cfg(not(feature = "verge-dev"))]
-    {
-        sysopt::Sysopt::global().refresh_guard().await;
-    }
+    sysopt::Sysopt::global().refresh_guard().await;
 }
 
 pub(super) async fn refresh_tray_menu() {

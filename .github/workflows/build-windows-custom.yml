@@ -112,9 +112,22 @@ jobs:
       - name: Build web frontend
         run: pnpm run web:build
 
-      - name: Cargo check with development logging
+      - name: Release fake-data guard
+        run: pnpm run check:runtime-data
+
+      - name: Recovery runtime Node tests
+        shell: pwsh
+        run: |
+          pnpm run test:runtime-data
+          pnpm run test:dashboard-runtime
+
+      - name: Verify Rust formatting
         working-directory: src-tauri
-        run: cargo check --locked --target x86_64-pc-windows-msvc --features verge-dev
+        run: cargo fmt --check
+
+      - name: Cargo check for the official Windows target
+        working-directory: src-tauri
+        run: cargo check --locked --target x86_64-pc-windows-msvc
 
       # This merges the CI-only override with tauri.conf.json. It leaves the
       # updater plugin, public key, endpoints, and normal release config intact.
@@ -132,11 +145,8 @@ jobs:
           if (Test-Path "$bundleRoot/nsis") {
             $installers += Get-ChildItem "$bundleRoot/nsis" -File -Filter '*.exe'
           }
-          if (Test-Path "$bundleRoot/msi") {
-            $installers += Get-ChildItem "$bundleRoot/msi" -File -Filter '*.msi'
-          }
           if ($installers.Count -eq 0) {
-            throw 'No NSIS installer EXE or MSI bundle was produced.'
+            throw 'No NSIS installer EXE was produced.'
           }
 
           $installers | ForEach-Object { Copy-Item $_.FullName -Destination $artifactDir -Force }

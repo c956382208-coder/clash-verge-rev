@@ -6,8 +6,8 @@ import { useTranslation } from 'react-i18next'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 
 import { BaseErrorBoundary, BaseLoading } from '@/components/base'
-import { DesignShell } from '@/components/layout/design-shell'
 import { NoticeManager } from '@/components/layout/notice-manager'
+import { RecoveredDesignShell } from '@/components/layout/recovered-design-shell'
 import { WindowResizeHandles } from '@/components/layout/window-controller'
 import { useI18n } from '@/hooks/use-i18n'
 import { useVerge } from '@/hooks/use-verge'
@@ -71,7 +71,7 @@ const Layout = () => {
     <ThemeProvider theme={theme}>
       <NoticeManager position={verge?.notice_position} />
       <WindowResizeHandles />
-      <DesignShell isHome={isHome}>
+      <RecoveredDesignShell isHome={isHome}>
         {isHome ? null : (
           <BaseErrorBoundary>
             <Outlet />
@@ -88,7 +88,7 @@ const Layout = () => {
             )}
           </BaseErrorBoundary>
         )}
-      </DesignShell>
+      </RecoveredDesignShell>
     </ThemeProvider>
   )
 }

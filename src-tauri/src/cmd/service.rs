@@ -2,19 +2,10 @@ use super::{CmdResult, StringifyErr as _};
 use crate::core::service::{self, SERVICE_MANAGER, ServiceStatus};
 
 async fn execute_service_operation_sync(status: ServiceStatus, op_type: &str) -> CmdResult {
-    #[cfg(feature = "verge-dev")]
-    {
-        let _ = (status, op_type);
-        return Err("Clash Verge Service operations are disabled in the isolated development build".into());
-    }
-
-    #[cfg(not(feature = "verge-dev"))]
-    {
-        SERVICE_MANAGER
-            .handle_service_status(status)
-            .await
-            .map_err(|e| format!("{op_type} Service failed: {e}").into())
-    }
+    SERVICE_MANAGER
+        .handle_service_status(status)
+        .await
+        .map_err(|e| format!("{op_type} Service failed: {e}").into())
 }
 
 #[tauri::command]

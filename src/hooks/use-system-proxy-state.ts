@@ -44,7 +44,6 @@ export const useSystemProxyState = () => {
   const busyRef = useRef(false)
 
   const toggleSystemProxy = async (enabled: boolean) => {
-    const previousConfigState = enable_system_proxy ?? false
     mutateVerge(
       (prev) => (prev ? { ...prev, enable_system_proxy: enabled } : prev),
       false,
@@ -63,18 +62,6 @@ export const useSystemProxyState = () => {
           await closeAllConnections().catch(() => {})
         }
       }
-    } catch (error) {
-      // The switch is rendered from Verge state. Restore the last persisted
-      // value before revalidating so a failed OS operation cannot leave a
-      // visually successful but non-functional System Proxy switch.
-      mutateVerge(
-        (prev) =>
-          prev
-            ? { ...prev, enable_system_proxy: previousConfigState }
-            : prev,
-        false,
-      )
-      throw error
     } finally {
       busyRef.current = false
       await revalidateQueries([['getSystemProxy'], ['getAutotemProxy']])

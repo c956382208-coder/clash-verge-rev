@@ -268,11 +268,6 @@ async fn process_terminated_flags(update_flags: UpdateFlags, patch: &IVerge) -> 
 }
 
 pub async fn patch_verge(patch: &IVerge, not_save_file: bool) -> Result<()> {
-    #[cfg(feature = "verge-dev")]
-    if patch.enable_system_proxy.is_some() || patch.enable_tun_mode.is_some() {
-        anyhow::bail!("System Proxy and TUN changes are disabled in the isolated development build");
-    }
-
     Config::verge().await.edit_draft(|d| d.patch_config(patch));
 
     let update_flags = determine_update_flags(patch);

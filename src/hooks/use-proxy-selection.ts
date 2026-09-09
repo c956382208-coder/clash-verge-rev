@@ -2,9 +2,11 @@ import { useCallback, useMemo, useRef } from 'react'
 import {
   closeConnection,
   getConnections,
+  getProxies,
   selectNodeForGroup,
 } from 'tauri-plugin-mihomo-api'
 
+import { isMihomoSelectionConfirmed } from '@/adapters/proxy-runtime'
 import { useProfiles } from '@/hooks/use-profiles'
 import { useVerge } from '@/hooks/use-verge'
 import { syncTrayProxySelection } from '@/services/cmds'
@@ -39,6 +41,12 @@ interface ProxyChangeRequest {
   previousProxy?: string
   skipConfigSave: boolean
 }
+
+const SELECTION_VERIFY_ATTEMPTS = 3
+const SELECTION_VERIFY_DELAY_MS = 150
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
 // 代理选择 Hook
 export const useProxySelection = (options: ProxySelectionOptions = {}) => {
@@ -135,6 +143,57 @@ export const useProxySelection = (options: ProxySelectionOptions = {}) => {
     }
   }, [executeChange])
 
+  const changeProxyVerified = useCallback(
+    async (
+      groupName: string,
+      proxyName: string,
+      previousProxy?: string,
+      skipConfigSave = false,
+    ) => {
+      try {
+        await selectNodeForGroup(groupName, proxyName)
+
+        let isVerified = false
+        for (let attempt = 0; attempt < SELECTION_VERIFY_ATTEMPTS; attempt++) {
+          const response = await getProxies()
+          if (isMihomoSelectionConfirmed(response.proxies, groupName, proxyName)) {
+            isVerified = true
+            break
+          }
+          if (attempt < SELECTION_VERIFY_ATTEMPTS - 1) {
+            await wait(SELECTION_VERIFY_DELAY_MS)
+          }
+        }
+
+        if (!isVerified) {
+          throw new Error(
+            `Mihomo did not confirm ${groupName} -> ${proxyName} after selection`,
+          )
+        }
+
+        onSuccess?.()
+        syncTraySelection()
+        persistSelection(groupName, proxyName, skipConfigSave)
+
+        if (
+          config.enableConnectionCleanup &&
+          config.autoCloseConnection &&
+          previousProxy
+        ) {
+          void cleanupConnections(previousProxy)
+        }
+      } catch (error) {
+        console.error(
+          `[ProxySelection] verified selection failed: ${groupName} -> ${proxyName}`,
+          error,
+        )
+        onError?.(error)
+        throw error
+      }
+    },
+    [config, onError, onSuccess, persistSelection, syncTraySelection],
+  )
+
   const changeProxy = useCallback(
     (
       groupName: string,
@@ -175,6 +234,7 @@ export const useProxySelection = (options: ProxySelectionOptions = {}) => {
 
   return {
     changeProxy,
+    changeProxyVerified,
     handleSelectChange,
     handleProxyGroupChange,
   }

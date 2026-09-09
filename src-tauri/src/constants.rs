@@ -1,28 +1,16 @@
 use std::time::Duration;
 
 pub mod network {
-    #[cfg(not(feature = "verge-dev"))]
     pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:9097";
-    #[cfg(feature = "verge-dev")]
-    pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:19097";
 
     pub mod ports {
         #[cfg(not(target_os = "windows"))]
         pub const DEFAULT_REDIR: u16 = 7895;
         #[cfg(target_os = "linux")]
         pub const DEFAULT_TPROXY: u16 = 7896;
-        #[cfg(not(feature = "verge-dev"))]
         pub const DEFAULT_MIXED: u16 = 7897;
-        #[cfg(feature = "verge-dev")]
-        pub const DEFAULT_MIXED: u16 = 17897;
-        #[cfg(not(feature = "verge-dev"))]
         pub const DEFAULT_SOCKS: u16 = 7898;
-        #[cfg(feature = "verge-dev")]
-        pub const DEFAULT_SOCKS: u16 = 17898;
-        #[cfg(not(feature = "verge-dev"))]
         pub const DEFAULT_HTTP: u16 = 7899;
-        #[cfg(feature = "verge-dev")]
-        pub const DEFAULT_HTTP: u16 = 17899;
 
         #[cfg(not(feature = "verge-dev"))]
         pub const SINGLETON_SERVER: u16 = 33331;

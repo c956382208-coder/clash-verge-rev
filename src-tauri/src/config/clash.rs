@@ -232,10 +232,10 @@ impl IClashTemp {
                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
                 _ => None,
             })
-            .unwrap_or(network::ports::DEFAULT_MIXED);
+            .unwrap_or(7897);
 
         if port == 0 {
-            port = network::ports::DEFAULT_MIXED;
+            port = 7897;
         }
 
         port
@@ -249,9 +249,9 @@ impl IClashTemp {
                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
                 _ => None,
             })
-            .unwrap_or(network::ports::DEFAULT_SOCKS);
+            .unwrap_or(7898);
         if port == 0 {
-            port = network::ports::DEFAULT_SOCKS;
+            port = 7898;
         }
         port
     }
@@ -264,9 +264,9 @@ impl IClashTemp {
                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
                 _ => None,
             })
-            .unwrap_or(network::ports::DEFAULT_HTTP);
+            .unwrap_or(7899);
         if port == 0 {
-            port = network::ports::DEFAULT_HTTP;
+            port = 7899;
         }
         port
     }
@@ -287,7 +287,7 @@ impl IClashTemp {
                 }
                 None => None,
             })
-            .unwrap_or_else(|| network::DEFAULT_EXTERNAL_CONTROLLER.into())
+            .unwrap_or_else(|| "127.0.0.1:9097".into())
     }
 
     pub fn guard_external_controller(config: &Mapping) -> String {
@@ -320,7 +320,7 @@ impl IClashTemp {
                 }
                 socket.to_string()
             }
-            Err(_) => network::DEFAULT_EXTERNAL_CONTROLLER.into(),
+            Err(_) => "127.0.0.1:9097".into(),
         }
     }
 

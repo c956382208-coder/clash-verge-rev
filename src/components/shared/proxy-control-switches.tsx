@@ -129,10 +129,6 @@ const ProxyControlSwitches = ({
   onError,
   noRightPadding = false,
 }: ProxySwitchProps) => {
-  // `pnpm dev` runs the Rust backend with the `verge-dev` feature. That
-  // feature deliberately blocks host-wide proxy, TUN, and service operations
-  // so a dashboard session cannot affect an installed production application.
-  const isIsolatedDevRuntime = import.meta.env.DEV
   const { t } = useTranslation()
   const { verge, mutateVerge, patchVerge } = useVerge()
   const { installServiceAndRestartCore } = useServiceInstaller()
@@ -193,15 +189,10 @@ const ProxyControlSwitches = ({
         <SwitchRow
           label={t('settings.sections.proxyControl.fields.systemProxy')}
           active={systemProxyIndicator}
-          infoTitle={
-            isIsolatedDevRuntime
-              ? 'System Proxy is locked while running the isolated development build.'
-              : t('settings.sections.proxyControl.tooltips.systemProxy')
-          }
+          infoTitle={t('settings.sections.proxyControl.tooltips.systemProxy')}
           onInfoClick={() => sysproxyRef.current?.open()}
           onToggle={(value) => toggleSystemProxy(value)}
           onError={onError}
-          disabled={isIsolatedDevRuntime}
           highlight={systemProxyIndicator}
         />
       )}
@@ -214,11 +205,11 @@ const ProxyControlSwitches = ({
           onInfoClick={() => tunRef.current?.open()}
           onToggle={handleTunToggle}
           onError={onError}
-          disabled={isIsolatedDevRuntime || !isTunModeAvailable}
+          disabled={!isTunModeAvailable}
           highlight={enable_tun_mode || false}
           extraIcons={
             <>
-              {!isIsolatedDevRuntime && !isTunModeAvailable && (
+              {!isTunModeAvailable && (
                 <>
                   <TooltipIcon
                     title={t(

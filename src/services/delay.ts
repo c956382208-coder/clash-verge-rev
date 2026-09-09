@@ -295,11 +295,13 @@ class DelayManager {
         // 确保API调用前状态为测试中
         this.setDelay(currName, group, -2)
 
-          // Stagger requests deterministically so a batch cannot burst the
-          // controller, without manufacturing any UI/telemetry values.
-          if (index > 1) {
-            await new Promise((resolve) => setTimeout(resolve, (index * 37) % 200))
-          }
+        // 添加一些随机延迟，避免所有请求同时发出和返回
+        if (index > 1) {
+          // 第一个不延迟，保持响应性
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.random() * 200),
+          )
+        }
 
         await this.checkDelay(currName, group, timeout, currProviderName)
         if (listener) {
