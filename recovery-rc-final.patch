@@ -1,0 +1,3238 @@
+diff --git a/.github/workflows/build-windows-custom.yml b/.github/workflows/build-windows-custom.yml
+index c55de1d3e9da7f5b96ddf41e634ca461b9b6b594..7e5a06d95dcf0721125e1a93c502b3d242734ea3 100644
+--- a/.github/workflows/build-windows-custom.yml
++++ b/.github/workflows/build-windows-custom.yml
+@@ -112,9 +112,22 @@ jobs:
+       - name: Build web frontend
+         run: pnpm run web:build
+ 
+-      - name: Cargo check with development logging
++      - name: Release fake-data guard
++        run: pnpm run check:runtime-data
++
++      - name: Recovery runtime Node tests
++        shell: pwsh
++        run: |
++          pnpm run test:runtime-data
++          pnpm run test:dashboard-runtime
++
++      - name: Verify Rust formatting
+         working-directory: src-tauri
+-        run: cargo check --locked --target x86_64-pc-windows-msvc --features verge-dev
++        run: cargo fmt --check
++
++      - name: Cargo check for the official Windows target
++        working-directory: src-tauri
++        run: cargo check --locked --target x86_64-pc-windows-msvc
+ 
+       # This merges the CI-only override with tauri.conf.json. It leaves the
+       # updater plugin, public key, endpoints, and normal release config intact.
+@@ -132,11 +145,8 @@ jobs:
+           if (Test-Path "$bundleRoot/nsis") {
+             $installers += Get-ChildItem "$bundleRoot/nsis" -File -Filter '*.exe'
+           }
+-          if (Test-Path "$bundleRoot/msi") {
+-            $installers += Get-ChildItem "$bundleRoot/msi" -File -Filter '*.msi'
+-          }
+           if ($installers.Count -eq 0) {
+-            throw 'No NSIS installer EXE or MSI bundle was produced.'
++            throw 'No NSIS installer EXE was produced.'
+           }
+ 
+           $installers | ForEach-Object { Copy-Item $_.FullName -Destination $artifactDir -Force }
+diff --git a/docs/full-recovery-audit.md b/docs/full-recovery-audit.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..94f5b8c7b938c65ab9d0c05d65948644c5cb9c6b
+--- /dev/null
++++ b/docs/full-recovery-audit.md
+@@ -0,0 +1,55 @@
++# Full product recovery audit
++
++## Scope and baselines
++
++- **Functional baseline:** the repository's `master` commit `ae69938` (the
++  locally established Clash Verge Rev v2.5.2 baseline).
++- **Visual baseline:** `src/assets/design-dashboard/index.html` and
++  `src/assets/design-dashboard/css/style.css`. They are reference material,
++  not an application data source.
++- **Recovery branch at audit start:** `custom-dashboard` at `0e2f448`.
++
++The audit was completed before the recovery changes below. `master..HEAD`
++contained 35 paths: the custom shell and styling, design reference assets,
++documentation/CI files, and several Rust/TypeScript business-layer changes.
++
++## Findings and recovery plan
++
++| Area | Current implementation at audit | Upstream v2.5.2 implementation | Root cause | Recovery strategy | Verification | Status |
++| --- | --- | --- | --- | --- | --- | --- |
++| Profile | `DesignTelemetryBridge` copied profile data into a parsed HTML document. | `useProfiles` reads `get_profiles`; profile page owns create/update/activate/delete. | A presentation DOM became a second, stale profile view model. | Render from `useProfiles` directly; profile mutations remain upstream. | 0/1/multiple profile empty and active-state checks. | Recovered |
++| Subscription metadata | Design template supplied subscription names, quota, and expiry before the bridge replaced some fields. | `IProfileItem.extra` is the source. | Demo markup could flash or be used accidentally. | Never import template HTML at runtime; show `--`/`Not provided` for absent metadata. | Static fake-data gate and dashboard adapter checks. | Recovered |
++| Proxy provider | Dashboard inferred nodes from HTML dropdowns and a hand-written mapper. | `calcuProxies` merges Mihomo `/proxies` and official provider data. | Two node models, one presentation-only. | Consume `useProxiesData` only and keep providers in the upstream provider. | Group/provider/node counts from the same object. | Recovered |
++| Proxy groups and nodes | The raw-DOM shell mixed `groups`, `records`, and demo dropdowns. | `calcuProxies` creates ordered groups with live `all`, `now`, and records. | Node availability depended on a brittle DOM bridge rather than the normal proxy model. | A typed dashboard adapter derives nodes from live groups; no Chain condition exists. | Chain off/on regression and real-profile check. | Recovered |
++| Node selection | The shell called `useProxySelection`, immediately displayed a success toast, and did not verify `now`. | `selectNodeForGroup` is the official selection path. | UI could claim success before Mihomo state was observed. | Retain the official selector; add post-write Mihomo selection verification before success. | Success, API failure, and mismatched-current-node rollback checks. | Recovered |
++| Latency | Bridge read only the final history entry. | Official delay manager and `delayGroup` own the requests/history. | No explicit unavailable/test-in-progress semantics in dashboard. | Render the official record history only; unavailable remains `--`. | Existing proxy delay action plus dashboard display. | Recovered |
++| Chain | Chain page has separate rendering, but the custom dashboard was independently derived. | `ProxyGroups` selects normal or chain renderer while shared proxy data remains outside that conditional. | Presentation path made it easy to confuse chain UI with node loading. | Dashboard never reads chain state; it always reads `useProxiesData`. | Toggle chain while dashboard proxy data remains present. | Recovered |
++| Clash mode | Raw DOM button patched mode and manually toggled classes. | `patchClashMode` plus `refreshClashConfig`. | Optimistic visual class was not tied to a re-read. | Use live config as selected state and revalidate after mutation. | Rule/Global/Direct success and failure. | Recovered |
++| System proxy | Custom hook added a partial rollback; custom shell directly set DOM checkbox state. | `useSystemProxyState` is the official source and mutation path. | Imperative checkbox could disagree with OS/config state. | Restore upstream business implementation; dashboard reads its indicator and only displays its result. | OFF → ON → OFF in native validation. | Recovered |
++| TUN/service | Custom branch disabled service/TUN operations under `verge-dev` and disabled controls in UI. | Upstream service/status lifecycle. | Custom build behavior diverged from production semantics. | Restore upstream service, config, and control code. | Unavailable/disabled/enabled native validation. | Recovered |
++| Traffic | High-frequency traffic updated the bridge effect, markup, and a second canvas renderer. | `useTrafficData` owns the real Mihomo websocket. | Full shell effect and canvas resizing on every traffic update. | Isolate traffic to `TrafficCard`; cap history at 60 and draw through one RAF/ResizeObserver. | 60-sample cap and WebSocket traffic observation. | Recovered |
++| Connections | Bridge updated dashboard-wide state from connection summary. | `useConnectionSummaryData` is a throttled external store. | Connection updates forced shell work. | Subscribe inside `ConnectionCard` only. | Active count matches the connection stream. | Recovered |
++| Exit IP | Shell used existing `getIpInfo` but rendered a template location as a fallback. | Existing IP service returns data or fails. | Design fallback masqueraded as runtime value. | Real result or `--`/`Unavailable` only. | Network failure displays unavailable. | Recovered |
++| Theme | Custom global stylesheet suppression and design-specific light overrides competed with MUI. | `useCustomTheme` controls palette/theme setting. | Token ownership was split; light sidebar tokens were incomplete. | Scoped `.design-shell` token sets for dark/light; theme changes do not key/remount runtime data. | Dark → Light → Dark → Light visual regression. | Recovered |
++| Shell and routes | A 889-line shell parsed HTML, attached many DOM listeners, and contained all dashboard state. | Layout renders persistent app providers and routed pages. | One high-churn component and non-React event lifecycle. | Split shell, header/sidebar, dashboard adapter/cards; keep routed content intact. | All eight routes, no duplicate navigation/scrollbars. | Recovered |
++| Resize/window | Custom window constants/decorations were changed together with the raw shell. | Official close-to-tray/window lifecycle. | Layout was partly JS/DOM-driven and the custom header had no component boundary. | Keep only the required undecorated Windows frame; use CSS grid and real window controls. | Continuous resize and titlebar controls. | Recovered |
++| Performance | Stars rendered continuously; traffic canvas resized on each draw; broad effects depended on all runtime data. | Upstream data providers are individually throttled. | Rendering and canvas work were coupled to shell render frequency. | Local cards; 30 FPS stars paused when hidden/reduced motion; canvas resizes only on observed size change. | Resize, idle, and traffic profiling. | Recovered |
++
++## Business-layer diff disposition
++
++The following non-presentation custom changes are not required for the design
++and are restored to `master`: `scripts/prebuild.mjs`, `src/services/api.ts`,
++`src/services/delay.ts`, `src/hooks/use-system-proxy-state.ts`,
++`src/components/shared/proxy-control-switches.tsx`,
++`src/components/setting/mods/clash-port-viewer.tsx`, and the custom changes in
++`src-tauri/src/{cmd/service.rs,config/clash.rs,config/verge.rs,constants.rs,core/service.rs,feat/config.rs,feat/proxy.rs,utils/dirs.rs,utils/resolve/mod.rs}`.
++
++`src-tauri/src/utils/resolve/window.rs` is retained only insofar as Windows
++needs the undecorated custom titlebar and the 900 x 600 tested minimum. Its
++close action still uses the upstream window lifecycle.
++
++## Explicit non-goals
++
++No production runtime reads the design template's sample subscriptions, sample
++nodes, IP address, traffic totals, or notification text. The reference files
++remain archived so visual comparisons are reproducible.
+diff --git a/docs/functional-parity-matrix.md b/docs/functional-parity-matrix.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..18da87e618a25ca64c26ea7bed73010a9bf00c32
+--- /dev/null
++++ b/docs/functional-parity-matrix.md
+@@ -0,0 +1,32 @@
++# Functional parity matrix
++
++`master` (`ae69938`, Clash Verge Rev v2.5.2 baseline) remains the authority for
++all business behavior. “Code gate” means the custom UI delegates to that
++implementation and static/build checks pass; it does not claim a real Windows
++network operation has already passed.
++
++| Capability | Official path reused by Custom | Code gate | Native runtime validation |
++| --- | --- | --- | --- |
++| Load/update/activate/delete profile | `useProfiles`, profile page and Rust commands | PASS | Required with real subscription |
++| Proxy groups, nodes, providers | `calcuProxies` → `AppDataProvider` → `useProxiesData` | PASS | Required after active profile |
++| Proxy selection | `selectNodeForGroup`, `useProxySelection`, tray/profile persistence | PASS; re-read verification added | Required: selected node changes in Mihomo |
++| Delay | Official proxy history and delay manager | PASS | Required: real delay test |
++| Chain mode | Existing proxy-page-only Chain renderer | PASS; dashboard has no Chain dependency | Required: off/on/off regression |
++| Clash mode | `patchClashMode`, `refreshClashConfig` | PASS | Required Rule/Global/Direct |
++| System proxy | `useSystemProxyState` and upstream Rust system proxy | PASS | Required OFF → ON → OFF |
++| TUN/service | `useSystemState`, `useVerge`, upstream Rust service lifecycle | PASS | Required unavailable/disabled/enabled |
++| Traffic | `useTrafficData` Mihomo websocket | PASS | Required idle and active traffic |
++| Connections | `useConnectionSummaryData` Mihomo websocket | PASS | Required connection count match |
++| Rules/logs/settings/unlock | Existing routed pages | PASS build/type/lint | Required route click-through |
++| Theme | Verge theme config plus scoped design tokens | PASS unit/static gate | Required Dark/Light repeat sequence |
++| Window lifecycle | Existing `useWindowControls`; custom undecorated Windows frame | PASS build/type/lint | Required minimize/maximize/close-to-tray |
++| Search | Route navigation plus live proxy-node result selection | PASS build/type/lint | Required interactive search |
++
++## Route and viewport regression plan
++
++The CSS grid has explicit responsive behavior from the accepted 900 x 600
++minimum through 2560 x 1440. The following must be checked in the packaged
++Windows application: 900x600, 1024x683, 1280x720, 1366x768, 1440x900,
++1600x900, 1920x1080, and 2560x1440, including continuous drag-resize,
++maximize, restore, and repeat theme switching. No native result is marked PASS
++until that executable validation can run.
+diff --git a/docs/performance-audit.md b/docs/performance-audit.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..50d52a74e5a5bab8c4d1cdfbaa6058c201e8dac2
+--- /dev/null
++++ b/docs/performance-audit.md
+@@ -0,0 +1,34 @@
++# Performance audit
++
++## Root cause
++
++The old `DesignTelemetryBridge` parsed the reference HTML and ran one broad
++effect over profiles, proxies, Clash config, traffic, connections, IP, theme,
++and Verge state. Traffic and connection changes therefore caused DOM scans,
++string signatures, and canvas work in the shell root. The star canvas also ran
++unconditionally at display refresh rate; traffic canvas backing dimensions were
++reset on every draw.
++
++## Recovery
++
++| Surface | Before | After |
++| --- | --- | --- |
++| Shell/Header/Sidebar | Coupled to raw-DOM telemetry effect. | Pure layout/navigation; no traffic or connection subscription. |
++| Subscription and node cards | Imperative `querySelector` writes. | Typed React data from the upstream profile/proxy provider. |
++| Traffic | Shell update plus canvas resize each render. | `TrafficChart` is the sole traffic subscriber, caps history at 60 samples, batches drawing in one RAF, and resizes only when `ResizeObserver` reports a real size change. |
++| Connections | Shell effect depended on connection summary. | `ConnectionCard` alone subscribes to the already throttled summary external store. |
++| Stars | 35 particles at an unrestricted RAF. | 24 particles at 30 FPS; paused when hidden and disabled for reduced motion. |
++| Layout | Raw template absolute positioning and JS bridge. | Scoped CSS Grid/Flex responsive layout; no JavaScript resize-layout state. |
++| GPU effects | Large reference blur rules could affect the shell. | Recovery scope disables backdrop blur on shell/content and preserves only local visual primitives. |
++
++## Acceptance evidence
++
++- `pnpm web:build`: PASS (Vite production build, 21.42 s).
++- Static review confirms no traffic/connection hook in `RecoveredDesignShell`,
++  `DesignHeader`, or `DesignSidebar`.
++- The traffic chart testable invariant is a fixed `MAX_SAMPLES = 60` buffer and
++  a single scheduled RAF.
++
++Native CPU, continuous resize, and WebView2 frame-time measurements remain a
++Windows EXE validation item because the local MSVC linker is unavailable (see
++the recovery report); they are not represented as passed by this audit.
+diff --git a/docs/proxy-runtime-flow.md b/docs/proxy-runtime-flow.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9522625b89c3ecebb428c7ce6def01df0489dd0
+--- /dev/null
++++ b/docs/proxy-runtime-flow.md
+@@ -0,0 +1,33 @@
++# Proxy runtime flow
++
++```text
++Active profile (useProfiles / get_profiles)
++  -> Rust profile activation and Mihomo runtime config
++  -> tauri-plugin-mihomo-api getProxies + getProxyProviders
++  -> services/cmds.ts calcuProxies
++       - merges provider proxy records
++       - builds ordered groups with group.now and group.all
++  -> AppDataProvider / useProxiesData
++  -> Proxies page and custom dashboard adapter
++  -> useProxySelection
++  -> selectNodeForGroup(group, node)
++  -> Mihomo /proxies current selection
++  -> refetch live proxy data and verify group.now
++```
++
++## Sources and responsibilities
++
++| Step | File / API | Responsibility |
++| --- | --- | --- |
++| Profile source | `src/hooks/use-profiles.ts`, `get_profiles` | Gets the actual active profile and its metadata. |
++| Runtime proxies | `tauri-plugin-mihomo-api:getProxies` | Reads Mihomo proxy groups, selections, and node records. |
++| Providers | `tauri-plugin-mihomo-api:getProxyProviders` | Reads provider-backed node data. |
++| Normalisation | `src/services/cmds.ts:calcuProxies` | Merges provider records and exposes `groups`, `records`, and `proxies`. |
++| Shared state | `src/providers/app-data-provider.tsx` | Caches and refreshes proxy data independent of Chain mode. |
++| Selection | `src/hooks/use-proxy-selection.ts` | Uses the official plugin `selectNodeForGroup`, persists selection, syncs tray, and verifies the re-read selection. |
++| Delay | `src/services/delay.ts`, `delayGroup` | Owns latency tests and delay history. |
++
++Chain mode is confined to `src/pages/proxies.tsx` and
++`src/components/proxy/proxy-groups.tsx`; it chooses a different proxy-page
++renderer only. It must never gate `calcuProxies`, `useProxiesData`, or the
++dashboard's group/node derivation.
+diff --git a/docs/recovery-report.md b/docs/recovery-report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6e3d3a2fed95303a699e78bfc9edfdb8af96c6b
+--- /dev/null
++++ b/docs/recovery-report.md
+@@ -0,0 +1,126 @@
++# Recovery report
++
++## Executive Summary
++
++This recovery returns non-visual custom behavior to the local Clash Verge Rev
++v2.5.2 baseline and replaces the raw HTML/imperative dashboard bridge with a
++React presentation layer fed only by upstream profile, Mihomo proxy, traffic,
++connection, and system-state hooks. The reference dashboard remains a visual
++archive; it is no longer parsed, injected, or used as a runtime data source.
++
++## Root Causes
++
++| Blocker | Root cause | Resolution |
++| --- | --- | --- |
++| UI stalls | One `DesignTelemetryBridge` subscribed to every high-frequency source, scanned an HTML tree, and redrew canvases from its shell effect. | Split header/sidebar/dashboard cards and localised traffic/connections. |
++| Light navigation disappeared | Light theme depended on incomplete overrides mixed with global design selectors. | Added a complete scoped dark/light token set, including sidebar text and icon tokens. |
++| Fake data | Runtime imported and parsed a design HTML file containing sample subscriptions, nodes, IPs and traffic. | Removed the runtime HTML import and added a production data guard. |
++| Nodes appeared only inconsistently | A brittle dashboard mapper and demo dropdown replaced the upstream view model, making node availability unrelated to the normal proxy page. | Dashboard reads `useProxiesData`/`calcuProxies` directly and has no Chain state. |
++| Selection could claim success early | The prior custom shell showed success after the request without reading Mihomo's selected value. | The official selection API is retained and verified by re-reading `getProxies` before success. |
++| Resize/layout defects | Absolute reference-template layout was combined with DOM mutation. | CSS Grid/Flex handles layout; JavaScript resize is confined to canvases. |
++
++## Business Layer Restore
++
++Restored from `master` / v2.5.2 baseline: custom development service isolation,
++ports and IPC changes, TUN/system-proxy blocks, service startup changes,
++prebuild sidecar shortcuts, system proxy UI modification, API/delay changes,
++and port randomisation. The only business-facing addition is a narrow
++post-selection readback in `useProxySelection`; it calls the official
++`selectNodeForGroup` and only enables a success UI once Mihomo reports the
++requested `group.now`.
++
++## Proxy Architecture
++
++```text
++Profile config -> Mihomo runtime -> getProxies/getProxyProviders
++  -> calcuProxies -> AppDataProvider/useProxiesData
++  -> dashboard proxy adapter -> React node selector
++  -> selectNodeForGroup -> Mihomo re-read verification -> UI refresh
++```
++
++See [proxy-runtime-flow.md](proxy-runtime-flow.md) for files, hooks, and API
++ownership. Chain mode remains in the upstream proxies page and cannot suppress
++normal dashboard nodes.
++
++## Upstream Reuse
++
++- Profiles: `useProfiles`, `get_profiles`, `updateProfile` and existing profile page.
++- Proxies/providers: `calcuProxies`, `AppDataProvider`, `useProxiesData`.
++- Selection: `useProxySelection`, plugin `selectNodeForGroup`, tray sync, profile selection persistence.
++- Delay: official delay history, delay manager, and `delayGroup`.
++- System Proxy/TUN: `useSystemProxyState`, `useSystemState`, `useVerge`, upstream Rust commands.
++- Mode: `patchClashMode` followed by `refreshClashConfig`.
++- Traffic/connections: existing Mihomo websocket hooks.
++
++## Runtime Data Provenance and Fake Data Removal
++
++The dashboard has no sample values. Empty information renders `No active
++profile`, `No proxy available`, `--`, `Unavailable`, or `Not provided`.
++`scripts/check-runtime-data.mjs` blocks known design subscriptions, fixed IPs,
++fixed quota text, and raw design-HTML imports from runtime TypeScript paths.
++The full field mapping is in [runtime-data-provenance.md](runtime-data-provenance.md).
++
++## Node Connection, Chain, System Proxy, TUN, and Mode
++
++Node selection sends the official request, reads Mihomo up to three times, and
++only then reports verified success; a mismatch or request failure refreshes the
++live proxy model and surfaces an error. System Proxy retains upstream OS-state
++indicator logic. TUN displays the true service/admin availability and does not
++pretend unavailable service state is enabled. Mode is always re-read after a
++change. Chain does not participate in dashboard data derivation.
++
++## Performance, Theme, and Responsive Layout
++
++Traffic updates only `TrafficChart`; connections only `ConnectionCard`. Traffic
++history is capped to 60 samples, canvas work is RAF-batched and size-observed,
++and the star field uses 24 particles at 30 FPS while visible only. The shell
++content disables broad backdrop blur. Scoped `[data-theme='dark']` and
++`[data-theme='light']` tokens cover shell/header/sidebar/card/text/input/button
++states. Layout is CSS Grid with desktop bounds from 900x600 through 2560x1440;
++the executable resize sequence remains a native validation step.
++
++All eight routes retain the persistent recovered header/sidebar: `/`,
++`/proxies`, `/profile`, `/connections`, `/rules`, `/logs`, `/unlock`, and
++`/settings`. Header search routes the named sections and offers live proxy-node
++matches; selecting a match uses the same verified selection path.
++
++## Tests and Local Gates
++
++PASS:
++
++- `pnpm typecheck`
++- `pnpm lint`
++- `pnpm web:build` (production Vite build, 9.33 s final run)
++- `pnpm check:runtime-data`
++- `pnpm test:runtime-data`
++- `pnpm test:dashboard-runtime` (empty data, Mihomo mapping, stale-selection rejection, light-token contract)
++- `cargo fmt --check`
++- `git diff --check`
++
++Native Windows functional testing remains required for a real profile, node
++delay/selection, system proxy, TUN, exit IP, traffic, window controls, and the
++full viewport matrix. The comparison plan is in
++[functional-parity-matrix.md](functional-parity-matrix.md).
++
++## Files Changed
++
++Key presentation files: `src/components/layout/recovered-design-shell.tsx`,
++`src/components/dashboard/traffic-chart.tsx`,
++`src/adapters/proxy-runtime.ts`,
++`src/assets/styles/design-shell.scss`, and `src/pages/_layout.tsx`.
++Business restoration is documented in [full-recovery-audit.md](full-recovery-audit.md).
++
++## Commit
++
++This report is committed with the recovery change; use repository `HEAD` for
++the immutable commit identifier.
++
++## Remaining Blocker
++
++Native `cargo check` cannot complete on this machine because the active
++`link.exe` is `C:\Program Files\Git\usr\bin\link.exe` (GNU coreutils), not the
++MSVC linker required by the installed `x86_64-pc-windows-msvc` Rust target. It
++fails before compiling project code, treating Unicode workspace paths as extra
++operands. Install/select Visual Studio C++ Build Tools (MSVC `link.exe`) and
++run the native Windows CI/EXE matrix; no ordinary product bug is classified as
++an accepted difference.
+diff --git a/docs/runtime-data-provenance.md b/docs/runtime-data-provenance.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..67f11518e14380d39168ad423f20d7356372f5db
+--- /dev/null
++++ b/docs/runtime-data-provenance.md
+@@ -0,0 +1,19 @@
++# Runtime data provenance
++
++| UI field | React variable / adapter | Hook or store | Service/API | Final source |
++| --- | --- | --- | --- | --- |
++| Profile name/count | `current`, `profiles.items` | `useProfiles` | `getProfiles` | Rust profile config |
++| Subscription used/total/expiry | `current.extra` | `useProfiles` | `getProfiles` | Profile subscription metadata |
++| Proxy group/current node/protocol | `selectedGroup`, `selectedNode` | `useProxiesData` | `calcuProxies` / Mihomo API | Mihomo `/proxies` |
++| Provider count | `proxyProviders` | `useProxiesData` | `calcuProxyProviders` | Mihomo `/providers/proxies` |
++| Latency | node `history` | `useProxiesData` | official delay manager / Mihomo API | Mihomo delay history |
++| Exit IP | `ipInfo` | query cache | `getIpInfo` | External IP service, otherwise unavailable |
++| Clash mode | `clashConfig.mode` | `useClashConfigData` | `getBaseConfig` | Mihomo config |
++| System proxy | `indicator` | `useSystemProxyState` | `getSystemProxy` / `getAutotemProxy` | Operating-system proxy state |
++| TUN | `verge.enable_tun_mode`, availability | `useVerge`, `useSystemState` | Rust Verge/service state | Verge configuration and service |
++| Download/upload | `traffic` | `useTrafficData` | Mihomo traffic websocket | Mihomo runtime stream |
++| Connections | `activeConnectionCount` | `useConnectionSummaryData` | Mihomo connections websocket | Mihomo runtime stream |
++| Memory/core | `--` | -- | -- | Unavailable: not fabricated |
++
++Missing traffic metadata is `--`; missing expiry is `Not provided`; missing
++profile is `No active profile`; and an empty group has `No proxy available`.
+diff --git a/package.json b/package.json
+index c41297f0742049fd948d3a43ce2f124b3cd57768..c6266ba01cbb9ff085a4c4d3bfc1820cad437e5f 100644
+--- a/package.json
++++ b/package.json
+@@ -26,6 +26,9 @@
+     "publish-version": "node scripts/publish-version.mjs",
+     "lint": "eslint -c eslint.config.ts --max-warnings=0 --cache --cache-location .eslintcache src",
+     "lint:fix": "eslint -c eslint.config.ts --max-warnings=0 --cache --cache-location .eslintcache --fix src",
++    "check:runtime-data": "node scripts/check-runtime-data.mjs",
++    "test:runtime-data": "node --test scripts/check-runtime-data.test.mjs",
++    "test:dashboard-runtime": "node --test scripts/dashboard-runtime.test.mjs",
+     "format": "biome format --write .",
+     "format:check": "biome format .",
+     "i18n:check": "node scripts/cleanup-unused-i18n.mjs",
+diff --git a/scripts/check-runtime-data.mjs b/scripts/check-runtime-data.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..11ddfe43205e899015337ce8e5cc26f23c5a5cd2
+--- /dev/null
++++ b/scripts/check-runtime-data.mjs
+@@ -0,0 +1,62 @@
++import { readFileSync } from 'node:fs'
++import { dirname, resolve } from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++import { globSync } from 'glob'
++
++const scriptDirectory = dirname(fileURLToPath(import.meta.url))
++const projectRoot = resolve(scriptDirectory, '..')
++
++export const forbiddenRuntimeValues = [
++  '美国国家宽',
++  '维云云',
++  '一元机场',
++  '极光网络',
++  '速连云',
++  '蓝鲸加速',
++  '104.21.28.173',
++  '103.24.11.89',
++  '133.18.29.4',
++  '150 GB',
++  '美国 | 洛杉矶 01',
++  '香港 | 专线 01',
++  '日本 | 东京 02',
++]
++
++export const runtimeSourceGlob = 'src/**/*.{ts,tsx}'
++export const runtimeIgnore = ['src/components/test/**']
++
++export const runRuntimeDataCheck = (root = projectRoot) => {
++  const violations = []
++  const files = globSync(runtimeSourceGlob, {
++    cwd: root,
++    nodir: true,
++    ignore: runtimeIgnore,
++  })
++
++  for (const file of files) {
++    const contents = readFileSync(resolve(root, file), 'utf8')
++    for (const value of forbiddenRuntimeValues) {
++      if (contents.includes(value)) violations.push(`${file}: ${value}`)
++    }
++    if (contents.includes('index.html?raw')) {
++      violations.push(`${file}: design HTML imported as runtime data`)
++    }
++  }
++
++  if (violations.length > 0) {
++    throw new Error(
++      `Production runtime data guard failed:\n${violations.join('\n')}`,
++    )
++  }
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  try {
++    runRuntimeDataCheck()
++    console.log('Runtime data guard passed.')
++  } catch (error) {
++    console.error(error instanceof Error ? error.message : error)
++    process.exitCode = 1
++  }
++}
+diff --git a/scripts/check-runtime-data.test.mjs b/scripts/check-runtime-data.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d48ea201c65f327ae70cd72476dbc3d96398b9f5
+--- /dev/null
++++ b/scripts/check-runtime-data.test.mjs
+@@ -0,0 +1,67 @@
++import assert from 'node:assert/strict'
++import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import test from 'node:test'
++import { dirname, resolve } from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++import {
++  forbiddenRuntimeValues,
++  runRuntimeDataCheck,
++} from './check-runtime-data.mjs'
++
++const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
++
++test('production runtime cannot reference dashboard fixtures', () => {
++  assert.doesNotThrow(() => runRuntimeDataCheck(root))
++})
++
++test('guard rejects every recovered fixture in production TS and TSX sources', () => {
++  const fixtureRoot = mkdtempSync(join(tmpdir(), 'clash-verge-runtime-guard-'))
++  try {
++    const sourceRoot = join(fixtureRoot, 'src')
++    mkdirSync(sourceRoot, { recursive: true })
++    const midpoint = Math.ceil(forbiddenRuntimeValues.length / 2)
++    writeFileSync(
++      join(sourceRoot, 'runtime.ts'),
++      forbiddenRuntimeValues.slice(0, midpoint).join('\n'),
++    )
++    writeFileSync(
++      join(sourceRoot, 'dashboard.tsx'),
++      forbiddenRuntimeValues.slice(midpoint).join('\n'),
++    )
++
++    assert.throws(
++      () => runRuntimeDataCheck(fixtureRoot),
++      (error) =>
++        error instanceof Error &&
++        forbiddenRuntimeValues.every((value) => error.message.includes(value)) &&
++        error.message.includes('runtime.ts') &&
++        error.message.includes('dashboard.tsx'),
++    )
++  } finally {
++    rmSync(fixtureRoot, { recursive: true, force: true })
++  }
++})
++
++test('the archived design HTML remains outside the production TypeScript scan', () => {
++  const fixtureRoot = mkdtempSync(join(tmpdir(), 'clash-verge-runtime-archive-'))
++  try {
++    const archiveDirectory = join(
++      fixtureRoot,
++      'src',
++      'assets',
++      'design-dashboard',
++    )
++    mkdirSync(archiveDirectory, { recursive: true })
++    writeFileSync(
++      join(archiveDirectory, 'index.html'),
++      forbiddenRuntimeValues.join('\n'),
++    )
++
++    assert.doesNotThrow(() => runRuntimeDataCheck(fixtureRoot))
++  } finally {
++    rmSync(fixtureRoot, { recursive: true, force: true })
++  }
++})
+diff --git a/scripts/dashboard-runtime.test.mjs b/scripts/dashboard-runtime.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7fa9270ea92e4995c12a1c0b60ec11444b86612
+--- /dev/null
++++ b/scripts/dashboard-runtime.test.mjs
+@@ -0,0 +1,131 @@
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { dirname, resolve } from 'node:path'
++import test from 'node:test'
++import { fileURLToPath } from 'node:url'
++
++import ts from 'typescript'
++
++const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
++const sourcePath = resolve(root, 'src/adapters/proxy-runtime.ts')
++const selectionSourcePath = resolve(root, 'src/hooks/use-proxy-selection.ts')
++const dashboardSourcePath = resolve(
++  root,
++  'src/components/layout/recovered-design-shell.tsx',
++)
++const proxyGroupsSourcePath = resolve(root, 'src/components/proxy/proxy-groups.tsx')
++const renderListSourcePath = resolve(root, 'src/components/proxy/use-render-list.ts')
++
++const loadAdapter = async () => {
++  const source = readFileSync(sourcePath, 'utf8')
++  const output = ts.transpileModule(source, {
++    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
++  }).outputText
++  return import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`)
++}
++
++const adapter = await loadAdapter()
++
++test('empty profile has a truthful dashboard state', () => {
++  const model = adapter.buildDashboardProxyModel()
++  assert.deepEqual(model.groups, [])
++  assert.deepEqual(model.nodes, [])
++  assert.equal(model.selectedGroup, undefined)
++  assert.equal(model.selectedNode, undefined)
++})
++
++test('real Mihomo groups map to their current node records', () => {
++  const model = adapter.buildDashboardProxyModel({
++    groups: [{ name: 'Auto', type: 'Selector', now: 'Tokyo', all: ['Tokyo', 'Direct'] }],
++    records: {
++      Tokyo: { name: 'Tokyo', type: 'Trojan', history: [{ delay: 42 }] },
++      Direct: { name: 'Direct', type: 'Direct', history: [] },
++    },
++  })
++  assert.equal(model.selectedGroup.name, 'Auto')
++  assert.deepEqual(model.selectedNode, { name: 'Tokyo', type: 'Trojan', delay: 42 })
++  assert.deepEqual(model.nodes[1], { name: 'Direct', type: 'Direct', delay: null })
++})
++
++test('verified node selection succeeds only after Mihomo reports the requested node', () => {
++  assert.equal(adapter.isMihomoSelectionConfirmed({ Auto: { now: 'Tokyo' } }, 'Auto', 'Tokyo'), true)
++  assert.equal(adapter.isMihomoSelectionConfirmed({ Auto: { now: 'Tokyo' } }, 'Auto', 'Osaka'), false)
++  assert.equal(adapter.isMihomoSelectionConfirmed(undefined, 'Auto', 'Tokyo'), false)
++})
++
++test('failed node selection keeps the previous Mihomo snapshot visible and refreshes it', () => {
++  const requestedNode = 'Osaka'
++  const snapshotAfterFailure = {
++    groups: [
++      { name: 'Auto', type: 'Selector', now: 'Tokyo', all: ['Tokyo', requestedNode] },
++    ],
++    records: {
++      Tokyo: { name: 'Tokyo', type: 'Trojan' },
++      [requestedNode]: { name: requestedNode, type: 'Vmess' },
++    },
++  }
++  const model = adapter.buildDashboardProxyModel(snapshotAfterFailure)
++  assert.equal(
++    adapter.isMihomoSelectionConfirmed(
++      { Auto: { now: snapshotAfterFailure.groups[0].now } },
++      'Auto',
++      requestedNode,
++    ),
++    false,
++  )
++  assert.equal(model.selectedNode?.name, 'Tokyo')
++
++  const selectionSource = readFileSync(selectionSourcePath, 'utf8')
++  const dashboardSource = readFileSync(dashboardSourcePath, 'utf8')
++  assert.match(
++    selectionSource,
++    /if \(!isVerified\) \{[\s\S]*?throw new Error\([\s\S]*?\)[\s\S]*?\}[\s\S]*?onSuccess\?\.\(\)[\s\S]*?persistSelection\(/,
++  )
++  assert.match(
++    selectionSource,
++    /catch \(error\) \{[\s\S]*?onError\?\.\(error\)[\s\S]*?throw error/,
++  )
++  assert.match(
++    dashboardSource,
++    /catch \(error\) \{[\s\S]*?await refreshProxy\(\)[\s\S]*?showNotice\.error\(error\)/,
++  )
++})
++
++test('selection contract calls Mihomo, verifies live state, then persists only on success', () => {
++  const selectionSource = readFileSync(selectionSourcePath, 'utf8')
++  const verifiedChange = selectionSource.slice(
++    selectionSource.indexOf('const changeProxyVerified'),
++    selectionSource.indexOf('const changeProxy ='),
++  )
++  const selectIndex = verifiedChange.indexOf('await selectNodeForGroup(groupName, proxyName)')
++  const readIndex = verifiedChange.indexOf('const response = await getProxies()')
++  const confirmationIndex = verifiedChange.indexOf(
++    'isMihomoSelectionConfirmed(response.proxies, groupName, proxyName)',
++  )
++  const persistIndex = verifiedChange.indexOf('persistSelection(groupName, proxyName, skipConfigSave)')
++
++  assert.ok(selectIndex >= 0)
++  assert.ok(readIndex > selectIndex)
++  assert.ok(confirmationIndex > readIndex)
++  assert.ok(persistIndex > confirmationIndex)
++  assert.match(verifiedChange, /SELECTION_VERIFY_ATTEMPTS/)
++})
++
++test('Chain Mode OFF dispatches the normal proxy list without chain filtering', () => {
++  const proxyGroupsSource = readFileSync(proxyGroupsSourcePath, 'utf8')
++  const renderListSource = readFileSync(renderListSourcePath, 'utf8')
++  assert.match(
++    proxyGroupsSource,
++    /if \(isChainMode\) \{[\s\S]*?return <ChainProxyGroups[\s\S]*?\}[\s\S]*?return <NormalProxyGroups mode=\{mode\} \/>/,
++  )
++  assert.match(
++    renderListSource,
++    /\/\/ 正常模式的渲染逻辑[\s\S]*?const renderGroups[\s\S]*?proxiesData\.groups/,
++  )
++})
++
++test('light-theme token contract defines readable navigation colors', () => {
++  const css = readFileSync(resolve(root, 'src/assets/styles/design-shell.scss'), 'utf8')
++  assert.match(css, /\[data-theme='light'\][\s\S]*?--sidebar-text: #16385d/)
++  assert.match(css, /\[data-theme='light'\][\s\S]*?--sidebar-icon: #174d8c/)
++})
+diff --git a/scripts/prebuild.mjs b/scripts/prebuild.mjs
+index 7ad6c53eed4c0fc105ad222ddf19bcb94bef4378..b506f40af8354828f59515c3bc16734a1bc6dcb4 100644
+--- a/scripts/prebuild.mjs
++++ b/scripts/prebuild.mjs
+@@ -754,34 +754,14 @@ const resolveUnSetDnsScript = () =>
+ const tasks = [
+   {
+     name: 'verge-mihomo-alpha',
+-    func: async () => {
+-      const sidecarPath = path.join(
+-        SIDECAR_DIR,
+-        `verge-mihomo-alpha-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
+-      )
+-      if (!FORCE && fs.existsSync(sidecarPath)) {
+-        log_success('"verge-mihomo-alpha" already exists, skipping download')
+-        return
+-      }
+-      await getLatestAlphaVersion()
+-      await resolveSidecar(clashMetaAlpha())
+-    },
++    func: () =>
++      getLatestAlphaVersion().then(() => resolveSidecar(clashMetaAlpha())),
+     retry: 5,
+   },
+   {
+     name: 'verge-mihomo',
+-    func: async () => {
+-      const sidecarPath = path.join(
+-        SIDECAR_DIR,
+-        `verge-mihomo-${SIDECAR_HOST}${platform === 'win32' ? '.exe' : ''}`,
+-      )
+-      if (!FORCE && fs.existsSync(sidecarPath)) {
+-        log_success('"verge-mihomo" already exists, skipping download')
+-        return
+-      }
+-      await getLatestReleaseVersion()
+-      await resolveSidecar(clashMeta())
+-    },
++    func: () =>
++      getLatestReleaseVersion().then(() => resolveSidecar(clashMeta())),
+     retry: 5,
+   },
+   { name: 'plugin', func: resolvePlugin, retry: 5, winOnly: true },
+diff --git a/src-tauri/src/cmd/service.rs b/src-tauri/src/cmd/service.rs
+index fc8a64dc370f25164eefbf788d4016d2b94abca3..862b2cbb36c986bee74f9b903acc562ad3137f5f 100644
+--- a/src-tauri/src/cmd/service.rs
++++ b/src-tauri/src/cmd/service.rs
+@@ -2,19 +2,10 @@ use super::{CmdResult, StringifyErr as _};
+ use crate::core::service::{self, SERVICE_MANAGER, ServiceStatus};
+ 
+ async fn execute_service_operation_sync(status: ServiceStatus, op_type: &str) -> CmdResult {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        let _ = (status, op_type);
+-        return Err("Clash Verge Service operations are disabled in the isolated development build".into());
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        SERVICE_MANAGER
+-            .handle_service_status(status)
+-            .await
+-            .map_err(|e| format!("{op_type} Service failed: {e}").into())
+-    }
++    SERVICE_MANAGER
++        .handle_service_status(status)
++        .await
++        .map_err(|e| format!("{op_type} Service failed: {e}").into())
+ }
+ 
+ #[tauri::command]
+diff --git a/src-tauri/src/config/clash.rs b/src-tauri/src/config/clash.rs
+index 559e8d994d21f1a4ddcf23fb4d8be24b34f6ff34..6e92503e121eb9646c25e49420c68225de0f9995 100644
+--- a/src-tauri/src/config/clash.rs
++++ b/src-tauri/src/config/clash.rs
+@@ -232,10 +232,10 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(network::ports::DEFAULT_MIXED);
++            .unwrap_or(7897);
+ 
+         if port == 0 {
+-            port = network::ports::DEFAULT_MIXED;
++            port = 7897;
+         }
+ 
+         port
+@@ -249,9 +249,9 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(network::ports::DEFAULT_SOCKS);
++            .unwrap_or(7898);
+         if port == 0 {
+-            port = network::ports::DEFAULT_SOCKS;
++            port = 7898;
+         }
+         port
+     }
+@@ -264,9 +264,9 @@ impl IClashTemp {
+                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                 _ => None,
+             })
+-            .unwrap_or(network::ports::DEFAULT_HTTP);
++            .unwrap_or(7899);
+         if port == 0 {
+-            port = network::ports::DEFAULT_HTTP;
++            port = 7899;
+         }
+         port
+     }
+@@ -287,7 +287,7 @@ impl IClashTemp {
+                 }
+                 None => None,
+             })
+-            .unwrap_or_else(|| network::DEFAULT_EXTERNAL_CONTROLLER.into())
++            .unwrap_or_else(|| "127.0.0.1:9097".into())
+     }
+ 
+     pub fn guard_external_controller(config: &Mapping) -> String {
+@@ -320,7 +320,7 @@ impl IClashTemp {
+                 }
+                 socket.to_string()
+             }
+-            Err(_) => network::DEFAULT_EXTERNAL_CONTROLLER.into(),
++            Err(_) => "127.0.0.1:9097".into(),
+         }
+     }
+ 
+diff --git a/src-tauri/src/config/verge.rs b/src-tauri/src/config/verge.rs
+index 0cf0480184d88f2385408a4b199f91a9d1ad3210..4f8749eb22157acb95f7d1ff0503256e9e3c581e 100644
+--- a/src-tauri/src/config/verge.rs
++++ b/src-tauri/src/config/verge.rs
+@@ -1,7 +1,6 @@
+ use crate::config::Config;
+ use crate::{
+     config::{DEFAULT_PAC, deserialize_encrypted, serialize_encrypted},
+-    constants::network,
+     utils::{dirs, help},
+ };
+ use anyhow::Result;
+@@ -420,10 +419,10 @@ impl IVerge {
+             verge_tproxy_port: Some(7896),
+             #[cfg(target_os = "linux")]
+             verge_tproxy_enabled: Some(false),
+-            verge_mixed_port: Some(network::ports::DEFAULT_MIXED),
+-            verge_socks_port: Some(network::ports::DEFAULT_SOCKS),
++            verge_mixed_port: Some(7897),
++            verge_socks_port: Some(7898),
+             verge_socks_enabled: Some(false),
+-            verge_port: Some(network::ports::DEFAULT_HTTP),
++            verge_port: Some(7899),
+             verge_http_enabled: Some(false),
+             enable_proxy_guard: Some(false),
+             enable_bypass_check: Some(true),
+diff --git a/src-tauri/src/constants.rs b/src-tauri/src/constants.rs
+index 4f6d854b8f3230d4a81045e04c5d57f49ffbcd64..1ff4e1496b83f7e13ecfffa19a9829811dd72e1b 100644
+--- a/src-tauri/src/constants.rs
++++ b/src-tauri/src/constants.rs
+@@ -1,28 +1,16 @@
+ use std::time::Duration;
+ 
+ pub mod network {
+-    #[cfg(not(feature = "verge-dev"))]
+     pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:9097";
+-    #[cfg(feature = "verge-dev")]
+-    pub const DEFAULT_EXTERNAL_CONTROLLER: &str = "127.0.0.1:19097";
+ 
+     pub mod ports {
+         #[cfg(not(target_os = "windows"))]
+         pub const DEFAULT_REDIR: u16 = 7895;
+         #[cfg(target_os = "linux")]
+         pub const DEFAULT_TPROXY: u16 = 7896;
+-        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_MIXED: u16 = 7897;
+-        #[cfg(feature = "verge-dev")]
+-        pub const DEFAULT_MIXED: u16 = 17897;
+-        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_SOCKS: u16 = 7898;
+-        #[cfg(feature = "verge-dev")]
+-        pub const DEFAULT_SOCKS: u16 = 17898;
+-        #[cfg(not(feature = "verge-dev"))]
+         pub const DEFAULT_HTTP: u16 = 7899;
+-        #[cfg(feature = "verge-dev")]
+-        pub const DEFAULT_HTTP: u16 = 17899;
+ 
+         #[cfg(not(feature = "verge-dev"))]
+         pub const SINGLETON_SERVER: u16 = 33331;
+diff --git a/src-tauri/src/core/service.rs b/src-tauri/src/core/service.rs
+index f36188e4c3eb587995f9dcacff3af75dde47f357..50c98e5ac54282f057cd627b9a2e8f17cc2dc415 100644
+--- a/src-tauri/src/core/service.rs
++++ b/src-tauri/src/core/service.rs
+@@ -551,25 +551,17 @@ pub(super) async fn stop_core_by_service() -> Result<()> {
+ 
+ /// 检查服务是否正在运行
+ pub async fn is_service_available() -> Result<()> {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        bail!("Clash Verge Service is disabled in the isolated development build");
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
+-            let verge = Config::verge().await;
+-            let verge_last = verge.latest_arc();
+-            let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
+-            if is_enable {
+-                logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
+-            }
+-            return Err(e.into());
++    if let Err(e) = Path::metadata(clash_verge_service_ipc::IPC_PATH.as_ref()) {
++        let verge = Config::verge().await;
++        let verge_last = verge.latest_arc();
++        let is_enable = verge_last.enable_tun_mode.unwrap_or(false);
++        if is_enable {
++            logging!(warn, Type::Service, "Some issue with service IPC Path: {}", e);
+         }
+-        clash_verge_service_ipc::connect().await?;
+-        Ok(())
++        return Err(e.into());
+     }
++    clash_verge_service_ipc::connect().await?;
++    Ok(())
+ }
+ 
+ async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
+@@ -598,15 +590,7 @@ async fn wait_for_service_ipc(manager: &ServiceManager) -> Result<()> {
+ }
+ 
+ pub fn is_service_ipc_path_exists() -> bool {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        false
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        Path::new(clash_verge_service_ipc::IPC_PATH).exists()
+-    }
++    Path::new(clash_verge_service_ipc::IPC_PATH).exists()
+ }
+ 
+ impl ServiceManager {
+diff --git a/src-tauri/src/feat/config.rs b/src-tauri/src/feat/config.rs
+index 69934807f0bf20b643c6bb7b36c013ed27b68e93..ef7b49d8be1cf80ac88566be23a022dbed0a6757 100644
+--- a/src-tauri/src/feat/config.rs
++++ b/src-tauri/src/feat/config.rs
+@@ -268,11 +268,6 @@ async fn process_terminated_flags(update_flags: UpdateFlags, patch: &IVerge) ->
+ }
+ 
+ pub async fn patch_verge(patch: &IVerge, not_save_file: bool) -> Result<()> {
+-    #[cfg(feature = "verge-dev")]
+-    if patch.enable_system_proxy.is_some() || patch.enable_tun_mode.is_some() {
+-        anyhow::bail!("System Proxy and TUN changes are disabled in the isolated development build");
+-    }
+-
+     Config::verge().await.edit_draft(|d| d.patch_config(patch));
+ 
+     let update_flags = determine_update_flags(patch);
+diff --git a/src-tauri/src/feat/proxy.rs b/src-tauri/src/feat/proxy.rs
+index d2a15358dcceb03c3efedddafd4630ac0f050e6c..1abcd9d838becb449e7ed0d0d01494dd84477dbe 100644
+--- a/src-tauri/src/feat/proxy.rs
++++ b/src-tauri/src/feat/proxy.rs
+@@ -77,9 +77,7 @@ pub async fn copy_clash_env() {
+         .unwrap_or_else(|| verge_cfg.proxy_host.as_deref().unwrap_or("127.0.0.1"));
+ 
+     let app_handle = handle::Handle::app_handle();
+-    let port = verge_cfg
+-        .verge_mixed_port
+-        .unwrap_or(crate::constants::network::ports::DEFAULT_MIXED);
++    let port = verge_cfg.verge_mixed_port.unwrap_or(7897);
+     let http_proxy = format!("http://{ip}:{port}");
+     let socks5_proxy = format!("socks5://{ip}:{port}");
+ 
+diff --git a/src-tauri/src/utils/dirs.rs b/src-tauri/src/utils/dirs.rs
+index e5993dfccbd50525bbd2fa60f46355f1e2e6a164..453f6365a4d20ae8278bb938c99813b22f67d593 100644
+--- a/src-tauri/src/utils/dirs.rs
++++ b/src-tauri/src/utils/dirs.rs
+@@ -243,15 +243,10 @@ pub fn ipc_path() -> Result<PathBuf> {
+         .ok_or_else(|| anyhow::anyhow!("Failed to determine ipc path"))
+ }
+ 
+-#[cfg(all(target_os = "windows", not(feature = "verge-dev")))]
++#[cfg(target_os = "windows")]
+ pub fn ipc_path() -> Result<PathBuf> {
+     Ok(PathBuf::from(r"\\.\pipe\verge-mihomo"))
+ }
+-
+-#[cfg(all(target_os = "windows", feature = "verge-dev"))]
+-pub fn ipc_path() -> Result<PathBuf> {
+-    Ok(PathBuf::from(r"\\.\pipe\verge-mihomo-dev"))
+-}
+ #[async_trait]
+ pub trait PathBufExec {
+     async fn remove_if_exists(&self) -> Result<()>;
+diff --git a/src-tauri/src/utils/resolve/mod.rs b/src-tauri/src/utils/resolve/mod.rs
+index 008ebad93ef3e39160d93688e36ae584b6c89e8c..7022de7193e0c31da124f07454697a56987f5bb2 100644
+--- a/src-tauri/src/utils/resolve/mod.rs
++++ b/src-tauri/src/utils/resolve/mod.rs
+@@ -189,17 +189,9 @@ pub(super) async fn init_verge_config_before_window() -> bool {
+ }
+ 
+ pub(super) async fn init_service_manager() {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        return;
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
+-        if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
+-            logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
+-        }
++    clash_verge_service_ipc::set_config(Some(ServiceManager::config())).await;
++    if is_service_ipc_path_exists() && SERVICE_MANAGER.init().await.is_ok() {
++        logging_error!(Type::Setup, SERVICE_MANAGER.refresh().await);
+     }
+ }
+ 
+@@ -208,27 +200,11 @@ pub(super) async fn init_core_manager() {
+ }
+ 
+ pub(super) async fn init_system_proxy() {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        return;
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
+-    }
++    logging_error!(Type::Setup, sysopt::Sysopt::global().update_sysproxy().await);
+ }
+ 
+ pub(super) async fn init_system_proxy_guard() {
+-    #[cfg(feature = "verge-dev")]
+-    {
+-        return;
+-    }
+-
+-    #[cfg(not(feature = "verge-dev"))]
+-    {
+-        sysopt::Sysopt::global().refresh_guard().await;
+-    }
++    sysopt::Sysopt::global().refresh_guard().await;
+ }
+ 
+ pub(super) async fn refresh_tray_menu() {
+diff --git a/src/adapters/proxy-runtime.ts b/src/adapters/proxy-runtime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4c3bd795bcc2056e4725a98728eaa3e05405171
+--- /dev/null
++++ b/src/adapters/proxy-runtime.ts
+@@ -0,0 +1,69 @@
++export interface RuntimeProxy {
++  name: string
++  type?: string
++  history?: Array<{ delay?: number }>
++}
++
++export interface RuntimeProxyGroup {
++  name: string
++  type?: string
++  now?: string
++  all?: Array<string | RuntimeProxy>
++}
++
++export interface RuntimeProxySnapshot {
++  groups?: RuntimeProxyGroup[]
++  records?: Record<string, RuntimeProxy>
++}
++
++export interface DashboardNode {
++  name: string
++  type: string
++  delay: number | null
++}
++
++export interface DashboardProxyModel {
++  groups: RuntimeProxyGroup[]
++  selectedGroup?: RuntimeProxyGroup
++  nodes: DashboardNode[]
++  selectedNode?: DashboardNode
++}
++
++const getDelay = (record?: RuntimeProxy): number | null => {
++  const delay = record?.history?.at(-1)?.delay
++  return typeof delay === 'number' && delay >= 0 ? delay : null
++}
++
++export const buildDashboardProxyModel = (
++  snapshot?: RuntimeProxySnapshot,
++  groupName?: string,
++): DashboardProxyModel => {
++  const groups = snapshot?.groups ?? []
++  const selectedGroup =
++    groups.find((group) => group.name === groupName) ??
++    groups.find((group) => Boolean(group.now)) ??
++    groups[0]
++  const nodes = (selectedGroup?.all ?? [])
++    .map((item) => {
++      const name = typeof item === 'string' ? item : item.name
++      const record =
++        typeof item === 'string' ? snapshot?.records?.[item] : item
++      return name
++        ? { name, type: record?.type ?? 'Unavailable', delay: getDelay(record) }
++        : undefined
++    })
++    .filter((node): node is DashboardNode => node !== undefined)
++
++  return {
++    groups,
++    selectedGroup,
++    nodes,
++    selectedNode: nodes.find((node) => node.name === selectedGroup?.now),
++  }
++}
++
++export const isMihomoSelectionConfirmed = (
++  proxyRecords: Record<string, { now?: string } | undefined> | undefined,
++  groupName: string,
++  proxyName: string,
++) => proxyRecords?.[groupName]?.now === proxyName
+diff --git a/src/assets/styles/design-shell.scss b/src/assets/styles/design-shell.scss
+index a94cbb6fcb2c3f9ef208bb7995af25816f8440f8..bfadd10d6ac838a8058c61b60f90f12da04334fa 100644
+--- a/src/assets/styles/design-shell.scss
++++ b/src/assets/styles/design-shell.scss
+@@ -389,3 +389,284 @@
+     }
+   }
+ }
++
++/* Recovery shell: React owns the runtime tree. The archived design CSS only
++ * supplies visual primitives; these scoped rules own layout and tokens. */
++.design-app {
++  --shell-bg: #03081b;
++  --header-bg: rgba(5, 16, 38, 0.94);
++  --sidebar-bg: rgba(5, 16, 38, 0.96);
++  --sidebar-border: rgba(56, 189, 248, 0.22);
++  --sidebar-text: #c8dcf8;
++  --sidebar-muted: #7b93b2;
++  --sidebar-icon: #9cc9ff;
++  --sidebar-active-bg: rgba(24, 104, 248, 0.32);
++  --sidebar-active-text: #ffffff;
++  --sidebar-active-icon: #ffffff;
++  --card-bg: rgba(6, 20, 44, 0.92);
++  --card-border: rgba(45, 120, 235, 0.32);
++  --text-primary: #e8f3ff;
++  --text-secondary: #b6cbe6;
++  --text-muted: #7b93b2;
++  --input-bg: rgba(8, 27, 58, 0.9);
++  --input-border: rgba(56, 189, 248, 0.3);
++  --button-bg: rgba(24, 104, 248, 0.34);
++  --button-text: #e8f3ff;
++  --hover-bg: rgba(56, 189, 248, 0.18);
++  --divider: rgba(56, 189, 248, 0.2);
++  --shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
++
++  background: var(--shell-bg);
++  color: var(--text-primary);
++
++  &[data-theme='light'] {
++    --shell-bg: #eaf3ff;
++    --header-bg: rgba(249, 252, 255, 0.98);
++    --sidebar-bg: rgba(243, 249, 255, 0.99);
++    --sidebar-border: rgba(24, 104, 248, 0.28);
++    --sidebar-text: #16385d;
++    --sidebar-muted: #496886;
++    --sidebar-icon: #174d8c;
++    --sidebar-active-bg: rgba(24, 104, 248, 0.16);
++    --sidebar-active-text: #0b2c58;
++    --sidebar-active-icon: #0b4fa3;
++    --card-bg: rgba(255, 255, 255, 0.96);
++    --card-border: rgba(24, 104, 248, 0.24);
++    --text-primary: #102a4a;
++    --text-secondary: #345673;
++    --text-muted: #57738c;
++    --input-bg: #ffffff;
++    --input-border: rgba(24, 104, 248, 0.34);
++    --button-bg: rgba(24, 104, 248, 0.12);
++    --button-text: #0d3767;
++    --hover-bg: rgba(24, 104, 248, 0.1);
++    --divider: rgba(24, 104, 248, 0.2);
++    --shadow: 0 10px 28px rgba(48, 94, 142, 0.16);
++  }
++
++  .window-shell {
++    background: var(--shell-bg);
++    border-color: var(--sidebar-border);
++  }
++
++  .design-starfield {
++    position: absolute;
++    inset: 0;
++    width: 100%;
++    height: 100%;
++    pointer-events: none;
++  }
++
++  .top-header,
++  .sidebar {
++    z-index: 10;
++    background: var(--header-bg);
++    border-color: var(--sidebar-border);
++  }
++
++  .sidebar {
++    background: var(--sidebar-bg);
++  }
++
++  .nav-item {
++    color: var(--sidebar-text);
++  }
++
++  .nav-item .nav-icon {
++    color: var(--sidebar-icon);
++  }
++
++  .nav-item:hover {
++    background: var(--hover-bg);
++    color: var(--sidebar-active-text);
++  }
++
++  .nav-item.active {
++    background: var(--sidebar-active-bg);
++    color: var(--sidebar-active-text);
++  }
++
++  .nav-item.active .nav-icon {
++    color: var(--sidebar-active-icon);
++  }
++
++  .search-box,
++  .theme-toggle,
++  .icon-btn,
++  .win-btn,
++  .active-node-box,
++  .exit-ip-card,
++  .segmented-control,
++  .status-box,
++  select {
++    color: var(--text-primary);
++    background: var(--input-bg);
++    border-color: var(--input-border);
++  }
++
++  .search-box input,
++  select {
++    color: var(--text-primary);
++  }
++
++  .design-search {
++    position: relative;
++  }
++
++  .design-search-results {
++    position: absolute;
++    z-index: 40;
++    top: calc(100% + 6px);
++    right: 0;
++    width: min(360px, 50vw);
++    overflow: hidden;
++    border: 1px solid var(--input-border);
++    border-radius: 9px;
++    background: var(--card-bg);
++    box-shadow: var(--shadow);
++
++    button {
++      display: flex;
++      width: 100%;
++      align-items: center;
++      justify-content: space-between;
++      gap: 12px;
++      padding: 8px 10px;
++      color: var(--text-primary);
++      text-align: left;
++      background: transparent;
++      border: 0;
++    }
++
++    button:hover:not(:disabled) {
++      background: var(--hover-bg);
++    }
++
++    small {
++      overflow: hidden;
++      color: var(--text-muted);
++      text-overflow: ellipsis;
++      white-space: nowrap;
++    }
++  }
++
++  .design-dashboard {
++    position: absolute;
++    inset: calc(var(--header-height) + 10px) var(--shell-padding) 10px
++      calc(var(--sidebar-width) + 11px);
++    display: grid;
++    grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr);
++    grid-template-rows: minmax(252px, 1.5fr) minmax(118px, 0.7fr) minmax(130px, 0.75fr) var(--footer-height);
++    grid-template-areas:
++      'subscription node'
++      'settings node'
++      'traffic status'
++      'footer footer';
++    gap: var(--content-gap);
++    overflow: auto;
++    padding-right: 2px;
++  }
++
++  .design-dashboard > .card,
++  .design-dashboard > .footer-bar {
++    position: relative;
++    inset: auto;
++    width: auto;
++    min-width: 0;
++    min-height: 0;
++    height: auto;
++  }
++
++  .design-dashboard .card {
++    background: var(--card-bg);
++    border-color: var(--card-border);
++    box-shadow: var(--shadow);
++  }
++
++  .design-dashboard .card-subscription { grid-area: subscription; }
++  .design-dashboard .card-node { grid-area: node; align-self: start; min-height: 320px; }
++  .design-dashboard .card-settings-mode { grid-area: settings; }
++  .design-dashboard .card-traffic { grid-area: traffic; }
++  .design-dashboard .card-status { grid-area: status; }
++  .design-dashboard .footer-bar { grid-area: footer; }
++
++  .design-dashboard .sub-list { min-height: 0; overflow: auto; }
++  .design-dashboard .sub-item { min-width: 0; }
++  .design-dashboard .sub-name,
++  .design-dashboard .sub-usage,
++  .design-dashboard .sub-reset { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++
++  .design-dashboard select {
++    width: 100%;
++    min-height: 30px;
++    border: 1px solid var(--input-border);
++    border-radius: 7px;
++  }
++
++  .design-dashboard .exit-ip-card {
++    width: 100%;
++    text-align: left;
++  }
++
++  .design-dashboard .exit-ip-card .ip-location {
++    display: block;
++    color: var(--text-muted);
++  }
++
++  .design-dashboard .status-grid {
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++  }
++
++  .design-dashboard .status-box {
++    border-color: var(--divider);
++  }
++
++  .design-dashboard .traffic-canvas-wrap { min-height: 92px; }
++  .design-dashboard .traffic-canvas-wrap canvas { width: 100%; height: 100%; }
++
++  .design-route-content {
++    display: block;
++    position: absolute;
++    z-index: 4;
++    inset: calc(var(--header-height) + 10px) var(--shell-padding) 10px calc(var(--sidebar-width) + 11px);
++    overflow: auto;
++    color: var(--text-primary);
++  }
++
++  .design-route-content .base-page,
++  .design-route-content .base-container,
++  .design-route-content .base-container > section,
++  .design-route-content .base-content {
++    min-height: 100%;
++    height: auto;
++    background: transparent !important;
++  }
++
++  .design-route-content .MuiPaper-root {
++    color: var(--text-primary);
++    background: var(--card-bg);
++    border-color: var(--card-border);
++  }
++
++  /* WebView2 cost guard: keep glow local and never blur the shell/content. */
++  .window-shell,
++  .design-dashboard,
++  .design-route-content {
++    backdrop-filter: none;
++    -webkit-backdrop-filter: none;
++  }
++}
++
++@media (min-width: 1440px) {
++  .design-app .design-dashboard {
++    grid-template-columns: minmax(0, 800px) minmax(280px, 420px);
++    justify-content: center;
++  }
++}
++
++@media (max-width: 980px) {
++  .design-app .design-dashboard {
++    grid-template-columns: minmax(0, 1.55fr) minmax(260px, 1fr);
++    gap: 8px;
++  }
++}
+diff --git a/src/components/base/base-page.tsx b/src/components/base/base-page.tsx
+index 7d09b1ea819649ba780d56108bede42425f6d0f8..0ae588b6286a95e5ab07da1378530bcb086ce2af 100644
+--- a/src/components/base/base-page.tsx
++++ b/src/components/base/base-page.tsx
+@@ -21,10 +21,10 @@ export const BasePage: React.FC<Props> = (props) => {
+   return (
+     <BaseErrorBoundary>
+       <div className="base-page">
+-        <header data-tauri-drag-region="false" style={{ userSelect: 'none' }}>
++        <header data-tauri-drag-region="true" style={{ userSelect: 'none' }}>
+           <Typography
+             sx={{ fontSize: '20px', fontWeight: '700 ' }}
+-            data-tauri-drag-region="false"
++            data-tauri-drag-region="true"
+           >
+             {title}
+           </Typography>
+diff --git a/src/components/dashboard/traffic-chart.tsx b/src/components/dashboard/traffic-chart.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..14135f6159c155b7ca5d591a4487f7baccd94ed1
+--- /dev/null
++++ b/src/components/dashboard/traffic-chart.tsx
+@@ -0,0 +1,154 @@
++import { useEffect, useRef } from 'react'
++
++import { useTrafficData } from '@/hooks/use-traffic-data'
++import parseTraffic from '@/utils/parse-traffic'
++
++type Sample = { down: number; up: number; timestamp: number }
++
++const MAX_SAMPLES = 60
++
++export const TrafficChart = () => {
++  const canvasRef = useRef<HTMLCanvasElement>(null)
++  const samplesRef = useRef<Sample[]>([])
++  const drawRef = useRef<() => void>(() => {})
++  const { response: { data: traffic } } = useTrafficData()
++
++  useEffect(() => {
++    const samples = samplesRef.current
++    samples.push({
++      down: Math.max(0, traffic?.down ?? 0),
++      up: Math.max(0, traffic?.up ?? 0),
++      timestamp: Date.now(),
++    })
++    if (samples.length > MAX_SAMPLES) samples.splice(0, samples.length - MAX_SAMPLES)
++    drawRef.current()
++  }, [traffic])
++
++  useEffect(() => {
++    const canvas = canvasRef.current
++    if (!canvas) return
++    const context = canvas.getContext('2d')
++    if (!context) return
++
++    let frame: number | undefined
++    let size = { width: 0, height: 0, ratio: 0 }
++
++    const resizeIfNeeded = () => {
++      const rect = canvas.getBoundingClientRect()
++      const ratio = window.devicePixelRatio || 1
++      if (
++        rect.width === size.width &&
++        rect.height === size.height &&
++        ratio === size.ratio
++      ) {
++        return rect
++      }
++      size = { width: rect.width, height: rect.height, ratio }
++      canvas.width = Math.max(1, Math.round(rect.width * ratio))
++      canvas.height = Math.max(1, Math.round(rect.height * ratio))
++      context.setTransform(ratio, 0, 0, ratio, 0, 0)
++      return rect
++    }
++
++    const draw = () => {
++      frame = undefined
++      const rect = resizeIfNeeded()
++      if (rect.width <= 0 || rect.height <= 0) return
++
++      const width = rect.width
++      const height = rect.height
++      const left = 42
++      const bottom = 18
++      const top = 8
++      const plotWidth = Math.max(1, width - left - 10)
++      const plotHeight = Math.max(1, height - top - bottom)
++      const samples = samplesRef.current
++      const maxRate = Math.max(1, ...samples.flatMap((sample) => [sample.down, sample.up]))
++
++      context.clearRect(0, 0, width, height)
++      context.font = '10px sans-serif'
++      context.fillStyle = 'var(--text-muted, #7b93b2)'
++      context.textAlign = 'right'
++      context.textBaseline = 'middle'
++      ;[1, 0.5, 0].forEach((ratio) => {
++        const y = top + plotHeight * (1 - ratio)
++        const [value, unit] = parseTraffic(maxRate * ratio)
++        context.fillText(ratio === 0 ? '0' : `${value} ${unit}/s`, left - 7, y)
++        context.beginPath()
++        context.setLineDash([3, 4])
++        context.strokeStyle = 'rgba(56, 189, 248, 0.16)'
++        context.moveTo(left, y)
++        context.lineTo(left + plotWidth, y)
++        context.stroke()
++      })
++      context.setLineDash([])
++
++      const drawSeries = (key: 'down' | 'up', stroke: string, fill: string) => {
++        if (samples.length < 2) return
++        const step = plotWidth / Math.max(1, samples.length - 1)
++        context.beginPath()
++        samples.forEach((sample, index) => {
++          const x = left + index * step
++          const y = top + plotHeight * (1 - Math.min(1, sample[key] / maxRate))
++          if (index === 0) context.moveTo(x, y)
++          else context.lineTo(x, y)
++        })
++        context.lineTo(left + plotWidth, top + plotHeight)
++        context.lineTo(left, top + plotHeight)
++        context.closePath()
++        context.fillStyle = fill
++        context.fill()
++
++        context.beginPath()
++        samples.forEach((sample, index) => {
++          const x = left + index * step
++          const y = top + plotHeight * (1 - Math.min(1, sample[key] / maxRate))
++          if (index === 0) context.moveTo(x, y)
++          else context.lineTo(x, y)
++        })
++        context.strokeStyle = stroke
++        context.lineWidth = 1.8
++        context.stroke()
++      }
++
++      drawSeries('down', '#00d2ff', 'rgba(0, 210, 255, 0.18)')
++      drawSeries('up', '#e879f9', 'rgba(232, 121, 249, 0.14)')
++    }
++
++    const scheduleDraw = () => {
++      if (frame === undefined) frame = window.requestAnimationFrame(draw)
++    }
++
++    drawRef.current = scheduleDraw
++    const observer = new ResizeObserver(scheduleDraw)
++    observer.observe(canvas.parentElement ?? canvas)
++    scheduleDraw()
++
++    return () => {
++      observer.disconnect()
++      if (frame !== undefined) window.cancelAnimationFrame(frame)
++      if (drawRef.current === scheduleDraw) drawRef.current = () => {}
++    }
++  }, [])
++
++  const [downValue, downUnit] = parseTraffic(traffic?.down ?? 0)
++  const [upValue, upUnit] = parseTraffic(traffic?.up ?? 0)
++
++  return (
++    <section className="card card-traffic" aria-label="Real-time traffic">
++      <div className="traffic-header">
++        <div className="traffic-title-group">
++          <span className="traffic-title">实时流量</span>
++          <span className="traffic-legend">下载 / 上传</span>
++        </div>
++      </div>
++      <div className="traffic-rates">
++        <span className="rate-badge rate-down">↓ {downValue} {downUnit}/s</span>
++        <span className="rate-badge rate-up">↑ {upValue} {upUnit}/s</span>
++      </div>
++      <div className="traffic-canvas-wrap">
++        <canvas ref={canvasRef} aria-label="Traffic history, last 60 samples" />
++      </div>
++    </section>
++  )
++}
+diff --git a/src/components/layout/design-shell.tsx b/src/components/layout/design-shell.tsx
+index 65be78c0a6ec56fc17f7ead86527c55acbde967f..2c51419aa76d296be352dab60e9f19a389720863 100644
+--- a/src/components/layout/design-shell.tsx
++++ b/src/components/layout/design-shell.tsx
+@@ -1,889 +1 @@
+-/* The design template is an audited local asset. Its event bridge intentionally
+-   uses imperative listeners because the DOM hierarchy is copied verbatim. */
+-/* eslint-disable @eslint-react/web-api-no-leaked-event-listener, @eslint-react/dom-no-dangerously-set-innerhtml */
+-import {
+-  useCallback,
+-  useEffect,
+-  useMemo,
+-  useRef,
+-  useState,
+-  type ReactNode,
+-} from 'react'
+-import { useLocation, useNavigate } from 'react-router'
+-
+-import designDocument from '@/assets/design-dashboard/index.html?raw'
+-import '@/assets/design-dashboard/css/style.css'
+-import '@/assets/styles/design-shell.scss'
+-import { useConnectionSummaryData } from '@/hooks/use-connection-data'
+-import { useProfiles } from '@/hooks/use-profiles'
+-import { useProxySelection } from '@/hooks/use-proxy-selection'
+-import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
+-import { useSystemState } from '@/hooks/use-system-state'
+-import { useTrafficData } from '@/hooks/use-traffic-data'
+-import { useVerge } from '@/hooks/use-verge'
+-import { useWindowControls } from '@/hooks/use-window'
+-import {
+-  useClashConfigData,
+-  useAppRefreshers,
+-  useProxiesData,
+-} from '@/providers/app-data-context'
+-import { getIpInfo } from '@/services/api'
+-import { patchClashMode, updateProfile } from '@/services/cmds'
+-import { useQuery } from '@/services/query-client'
+-import { useSetThemeMode, useThemeMode } from '@/services/states'
+-import parseTraffic from '@/utils/parse-traffic'
+-
+-const ROUTE_BY_TAB: Record<string, string> = {
+-  home: '/',
+-  proxies: '/proxies',
+-  subscriptions: '/profile',
+-  connections: '/connections',
+-  rules: '/rules',
+-  logs: '/logs',
+-  test: '/unlock',
+-  settings: '/settings',
+-}
+-
+-const SEARCH_DESTINATIONS: Array<{ terms: string[]; path: string }> = [
+-  { terms: ['代理', 'proxy', '节点', 'node'], path: '/proxies' },
+-  { terms: ['订阅', 'subscription', 'profile'], path: '/profile' },
+-  { terms: ['连接', 'connection'], path: '/connections' },
+-  { terms: ['规则', 'rule'], path: '/rules' },
+-  { terms: ['日志', 'log'], path: '/logs' },
+-  { terms: ['测试', 'test', '解锁', 'unlock'], path: '/unlock' },
+-  { terms: ['设置', 'setting'], path: '/settings' },
+-]
+-
+-const text = (root: ParentNode, selector: string, value: string) => {
+-  const element = root.querySelector<HTMLElement>(selector)
+-  if (element) element.textContent = value
+-}
+-
+-const sanitizeDesignDocument = (source: string) => {
+-  if (typeof DOMParser === 'undefined') return ''
+-
+-  const document = new DOMParser().parseFromString(source, 'text/html')
+-  const shell = document.querySelector('.window-shell')
+-  if (!shell) return ''
+-
+-  // The design file is the DOM/CSS source of truth, but its demo telemetry is
+-  // deliberately removed before rendering. Live values are filled by the
+-  // bridge below from Clash Verge/Mihomo state.
+-  const subList = shell.querySelector('.sub-list')
+-  subList?.replaceChildren()
+-  const nodeMenu = shell.querySelector('#nodeMenu')
+-  nodeMenu?.replaceChildren()
+-  const groupMenu = shell.querySelector('#groupMenu')
+-  groupMenu?.replaceChildren()
+-
+-  for (const selector of [
+-    '#totalTrafficUsed',
+-    '#totalTrafficPercent',
+-    '#expireDays',
+-    '#subCount',
+-    '#currentServerName',
+-    '#currentProto',
+-    '#currentPing',
+-    '#selectedGroupName',
+-    '#selectedNodeName',
+-    '#exitIpAddress',
+-    '#exitIpLocation',
+-    '#rateDownVal',
+-    '#rateUpVal',
+-    '#activeConnCount',
+-    '#cpuUsageVal',
+-    '#sessionDownVal',
+-    '#sessionUpVal',
+-  ]) {
+-    text(shell, selector, '--')
+-  }
+-  shell.querySelector<HTMLElement>('#totalProgressBar')?.style.setProperty(
+-    'width',
+-    '0%',
+-  )
+-  text(shell, '.expire-date', '--')
+-  text(shell, '.traffic-total', '--')
+-  text(shell, '.ver-text', 'v2.5.2')
+-  text(shell, '.app-version-info span:first-child', 'Clash Verge v2.5.2')
+-
+-  shell.querySelectorAll<HTMLElement>('.nav-item').forEach((item) => {
+-    const tab = item.dataset.tab
+-    const labels: Record<string, string> = {
+-      home: '首页',
+-      proxies: '代理',
+-      subscriptions: '订阅',
+-      connections: '连接',
+-      rules: '规则',
+-      logs: '日志',
+-      test: '测试',
+-      settings: '设置',
+-    }
+-    const label = item.querySelector('.nav-label')
+-    if (tab && label && labels[tab]) label.textContent = labels[tab]
+-  })
+-
+-  return shell.innerHTML
+-}
+-
+-const profileRows = (profiles: any[] | undefined) => {
+-  const rows = document.createDocumentFragment()
+-  for (const profile of profiles ?? []) {
+-    if (!profile) continue
+-    const item = document.createElement('div')
+-    item.className = 'sub-item'
+-    item.dataset.name = profile.name || profile.file || profile.uid || ''
+-
+-    const brand = document.createElement('div')
+-    brand.className = 'sub-brand'
+-    const icon = document.createElement('div')
+-    icon.className = 'custom-icon icon-cloud-spark'
+-    icon.textContent = '✦'
+-    const name = document.createElement('span')
+-    name.className = 'sub-name'
+-    name.textContent = profile.name || profile.file || profile.uid || '未命名订阅'
+-    brand.append(icon, name)
+-
+-    const extra = profile.extra
+-    const upload = Number(extra?.upload || 0)
+-    const download = Number(extra?.download || 0)
+-    const total = Number(extra?.total || 0)
+-    const used = upload + download
+-    const [usedValue, usedUnit] = parseTraffic(used)
+-    const [totalValue, totalUnit] = parseTraffic(total)
+-    const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0
+-
+-    const usage = document.createElement('div')
+-    usage.className = 'sub-usage'
+-    usage.textContent = total > 0 ? `${usedValue} ${usedUnit} / ${totalValue} ${totalUnit}` : '--'
+-    const progressWrap = document.createElement('div')
+-    progressWrap.className = 'sub-prog-wrap'
+-    const progress = document.createElement('div')
+-    progress.className = 'sub-prog-bar'
+-    progress.style.width = `${percent}%`
+-    progressWrap.append(progress)
+-    const percentNode = document.createElement('div')
+-    percentNode.className = 'sub-percent'
+-    percentNode.textContent = total > 0 ? `${percent}%` : '--'
+-    const reset = document.createElement('div')
+-    reset.className = 'sub-reset'
+-    reset.textContent = extra?.expire
+-      ? `到期 ${new Date(extra.expire * 1000).toISOString().slice(0, 10)}`
+-      : '到期信息不可用'
+-    const action = document.createElement('button')
+-    action.className = 'btn-node-list'
+-    action.dataset.source = profile.name || profile.file || profile.uid || ''
+-    action.textContent = '节点列表 >'
+-    item.append(brand, usage, progressWrap, percentNode, reset, action)
+-    rows.append(item)
+-  }
+-  return rows
+-}
+-
+-type DesignNode = {
+-  name: string
+-  ping: number | '--'
+-  proto: string
+-}
+-
+-const latestDelay = (record: any): number | '--' => {
+-  const history = Array.isArray(record?.history) ? record.history : []
+-  const delay = history[history.length - 1]?.delay
+-  return typeof delay === 'number' && delay >= 0 ? delay : '--'
+-}
+-
+-const proxyRows = (proxies: any, groupName?: string): DesignNode[] => {
+-  const records = proxies?.records || {}
+-  const groups = Array.isArray(proxies?.groups) ? proxies.groups : []
+-  const group =
+-    groups.find((candidate: any) => candidate?.name === groupName) || groups[0]
+-  const candidates = Array.isArray(group?.all) ? group.all : []
+-  const names: string[] = candidates
+-    .map((candidate: any) =>
+-      typeof candidate === 'string' ? candidate : candidate?.name,
+-    )
+-    .filter((name: unknown): name is string => Boolean(name))
+-
+-  return names.map((name): DesignNode => {
+-    const record = records[name] || {}
+-    return {
+-      name,
+-      ping: latestDelay(record),
+-      proto: record.type || '--',
+-    }
+-  })
+-}
+-
+-const DesignTelemetryBridge = () => {
+-  const shellRef = useRef<HTMLDivElement>(null)
+-  const trafficHistoryRef = useRef<{
+-    down: Array<{ value: number; timestamp: number }>
+-    up: Array<{ value: number; timestamp: number }>
+-  }>({
+-    down: [],
+-    up: [],
+-  })
+-  const renderTrafficRef = useRef<(() => void) | null>(null)
+-  const [selectedGroupName, setSelectedGroupName] = useState<string>()
+-  const { profiles, current, mutateProfiles } = useProfiles()
+-  const { proxies } = useProxiesData()
+-  const { clashConfig } = useClashConfigData()
+-  const { refreshClashConfig, refreshProxy } = useAppRefreshers()
+-  const { indicator: systemProxyEnabled, toggleSystemProxy } = useSystemProxyState()
+-  const { isTunModeAvailable } = useSystemState()
+-  const { patchVerge, verge } = useVerge()
+-  const themeMode = useThemeMode()
+-  const setThemeMode = useSetThemeMode()
+-  const {
+-    response: { data: traffic },
+-  } = useTrafficData()
+-  const {
+-    response: { data: connectionSummary },
+-  } = useConnectionSummaryData()
+-  const groups = useMemo(
+-    () => (Array.isArray(proxies?.groups) ? proxies.groups : []),
+-    [proxies],
+-  )
+-  const defaultGroupName = groups.find((group: any) => group?.now)?.name || groups[0]?.name
+-  const activeGroupName = selectedGroupName || defaultGroupName
+-  const nodes = useMemo(
+-    () => proxyRows(proxies, activeGroupName),
+-    [activeGroupName, proxies],
+-  )
+-  const activeGroup = groups.find((group: any) => group?.name === activeGroupName)
+-  const selectedNode =
+-    nodes.find((node) => node.name === activeGroup?.now) || nodes[0]
+-  const { data: ipInfo } = useQuery({
+-    queryKey: ['cv_ip_info_cache'],
+-    queryFn: getIpInfo,
+-    staleTime: Infinity,
+-    refetchOnWindowFocus: false,
+-    refetchOnReconnect: false,
+-    retry: 1,
+-  })
+-  const showToast = useCallback((message: string) => {
+-    const container = shellRef.current?.querySelector<HTMLElement>('#toastContainer')
+-    if (!container) return
+-    const toast = document.createElement('div')
+-    toast.className = 'toast-msg'
+-    const icon = document.createElement('span')
+-    icon.style.color = '#38bdf8'
+-    icon.textContent = '✦'
+-    const copy = document.createElement('span')
+-    copy.textContent = message
+-    toast.append(icon, copy)
+-    container.append(toast)
+-    const toastTimeoutId = window.setTimeout(() => toast.remove(), 2500)
+-    toast.dataset.timeoutId = String(toastTimeoutId)
+-  }, [])
+-  const { changeProxy } = useProxySelection({
+-    onSuccess: () => {
+-      void refreshProxy()
+-      showToast('节点切换成功')
+-    },
+-    onError: (error) => {
+-      console.error('[DesignShell] 节点切换失败:', error)
+-      showToast('节点切换失败，已保留当前连接')
+-    },
+-  })
+-
+-  useEffect(() => {
+-    const shell = shellRef.current
+-    if (!shell) return
+-
+-    const subList = shell.querySelector<HTMLElement>('#subList')
+-    if (subList) {
+-      const profileSignature = (profiles?.items || [])
+-        .filter(Boolean)
+-        .map((profile: any) => {
+-          const extra = profile.extra || {}
+-          return [
+-            profile.uid,
+-            profile.name,
+-            profile.file,
+-            extra.upload,
+-            extra.download,
+-            extra.total,
+-            extra.expire,
+-          ].join(':')
+-        })
+-        .join('|')
+-      if (subList.dataset.signature !== profileSignature) {
+-        subList.replaceChildren()
+-        const rows = profileRows(profiles?.items)
+-        if (rows.childNodes.length === 0) {
+-          const empty = document.createElement('div')
+-          empty.className = 'design-data-empty'
+-          empty.textContent = '暂无可用订阅资料'
+-          subList.append(empty)
+-        } else {
+-          subList.append(rows)
+-        }
+-        subList.dataset.signature = profileSignature
+-      }
+-    }
+-    text(shell, '#subCount', String(profiles?.items?.length ?? 0))
+-
+-    const extra = current?.extra
+-    const used = Number(extra?.upload || 0) + Number(extra?.download || 0)
+-    const total = Number(extra?.total || 0)
+-    const [usedValue, usedUnit] = parseTraffic(used)
+-    const [totalValue, totalUnit] = parseTraffic(total)
+-    const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0
+-    text(shell, '#totalTrafficUsed', total > 0 ? `${usedValue}` : '--')
+-    text(shell, '.traffic-unit', total > 0 ? usedUnit : '')
+-    text(shell, '.traffic-total', total > 0 ? `${totalValue} ${totalUnit}` : '--')
+-    text(shell, '#totalTrafficPercent', total > 0 ? `${percent}%` : '--')
+-    shell.querySelector<HTMLElement>('#totalProgressBar')?.style.setProperty('width', `${percent}%`)
+-    text(shell, '.expire-date', extra?.expire ? new Date(extra.expire * 1000).toISOString().slice(0, 10) : '--')
+-    text(shell, '#expireDays', extra?.expire ? String(Math.max(0, Math.ceil((extra.expire * 1000 - Date.now()) / 86400000))) : '--')
+-
+-    const down = parseTraffic(traffic?.down || 0)
+-    const up = parseTraffic(traffic?.up || 0)
+-    text(shell, '#rateDownVal', traffic ? `${down[0]}` : '--')
+-    text(shell, '#rateUpVal', traffic ? `${up[0]}` : '--')
+-    text(shell, '#sessionDownVal', traffic ? `${parseTraffic(traffic.downTotal || 0).join(' ')} ` : '--')
+-    text(shell, '#sessionUpVal', traffic ? `${parseTraffic(traffic.upTotal || 0).join(' ')} ` : '--')
+-    text(shell, '#activeConnCount', String(connectionSummary?.activeConnectionCount ?? 0))
+-    text(shell, '#cpuUsageVal', '--')
+-
+-    const mode = String(clashConfig?.mode || '').toLowerCase()
+-    shell.querySelectorAll<HTMLElement>('.seg-btn').forEach((button) => {
+-      button.classList.toggle('active', button.dataset.mode === mode)
+-    })
+-    const systemToggle = shell.querySelector<HTMLInputElement>('#toggleSystemProxy')
+-    const tunToggle = shell.querySelector<HTMLInputElement>('#toggleTunMode')
+-    if (systemToggle) systemToggle.checked = systemProxyEnabled
+-    if (tunToggle) tunToggle.checked = Boolean(verge?.enable_tun_mode && isTunModeAvailable)
+-    shell.querySelector('#themeSun')?.classList.toggle('active', themeMode === 'light')
+-    shell.querySelector('#themeMoon')?.classList.toggle('active', themeMode === 'dark')
+-    shell.classList.toggle('design-light-theme', themeMode === 'light')
+-
+-    const noticeBadge = shell.querySelector<HTMLElement>('.notice-badge')
+-    if (noticeBadge) noticeBadge.hidden = true
+-
+-    const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
+-    if (groupMenu) {
+-      const groupNames = groups.map((group: any) => group?.name).filter(Boolean)
+-      const existingNames = Array.from(groupMenu.querySelectorAll<HTMLElement>('.dropdown-item')).map((item) => item.dataset.value)
+-      if (groupNames.join('|') !== existingNames.join('|')) {
+-        groupMenu.replaceChildren()
+-        for (const group of groups) {
+-          if (!group?.name) continue
+-          const option = document.createElement('div')
+-          option.className = 'dropdown-item'
+-          option.dataset.value = group.name
+-          option.textContent = group.name
+-          groupMenu.append(option)
+-        }
+-        text(shell, '#selectedGroupName', activeGroupName || '--')
+-      }
+-    }
+-
+-    const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
+-    if (nodeMenu) {
+-      const signature = nodes.map((node) => `${node.name}:${node.ping}`).join('|')
+-      if (
+-        nodeMenu.dataset.signature !== signature ||
+-        nodeMenu.dataset.group !== (activeGroupName || '')
+-      ) {
+-        nodeMenu.replaceChildren()
+-        for (const node of nodes) {
+-          const option = document.createElement('div')
+-          option.className = 'dropdown-item'
+-          option.dataset.node = node.name
+-          option.dataset.ping = String(node.ping)
+-          option.dataset.proto = node.proto
+-          option.dataset.group = activeGroupName || ''
+-          option.textContent = `${node.name} (${node.ping === '--' ? '--' : `${node.ping}ms`})`
+-          nodeMenu.append(option)
+-        }
+-        nodeMenu.dataset.signature = signature
+-        nodeMenu.dataset.group = activeGroupName || ''
+-      }
+-    }
+-    text(shell, '#selectedGroupName', activeGroupName || '--')
+-    text(shell, '#selectedNodeName', selectedNode?.name || '--')
+-    text(shell, '#currentServerName', selectedNode?.name || '--')
+-    text(shell, '#currentProto', selectedNode?.proto || '--')
+-    text(shell, '#currentPing', String(selectedNode?.ping ?? '--'))
+-    text(shell, '#exitIpAddress', ipInfo?.ip || '--')
+-    text(
+-      shell,
+-      '#exitIpLocation',
+-      [ipInfo?.city, ipInfo?.region, ipInfo?.country].filter(Boolean).join(', ') ||
+-        'Unavailable',
+-    )
+-  }, [activeGroupName, clashConfig, connectionSummary, current, groups, ipInfo, isTunModeAvailable, nodes, profiles, selectedNode, systemProxyEnabled, themeMode, traffic, verge?.enable_tun_mode])
+-
+-  useEffect(() => {
+-    const shell = shellRef.current
+-    if (!shell) return
+-    const cleanups: Array<() => void> = []
+-    const on = <T extends Element>(selector: string, event: string, handler: (event: Event, element: T) => void) => {
+-      shell.querySelectorAll<T>(selector).forEach((element) => {
+-        const listener = (event: Event) => handler(event, element)
+-        element.addEventListener(event, listener)
+-        cleanups.push(() => element.removeEventListener(event, listener))
+-      })
+-    }
+-
+-    on<HTMLElement>('.btn-node-list', 'click', (event) => {
+-      event.stopPropagation()
+-      const overlay = shell.querySelector<HTMLElement>('#nodeModalOverlay')
+-      const body = shell.querySelector<HTMLElement>('#modalNodeList')
+-      if (!overlay || !body) return
+-      text(shell, '#modalTitle', `${activeGroupName || '当前策略组'} - 实时节点`)
+-      body.replaceChildren()
+-      if (nodes.length === 0) {
+-        const empty = document.createElement('div')
+-        empty.className = 'design-data-empty'
+-        empty.textContent = '暂无实时节点'
+-        body.append(empty)
+-      } else {
+-        for (const node of nodes) {
+-          const item = document.createElement('div')
+-          item.className = 'modal-node-item'
+-          item.dataset.node = node.name
+-          item.dataset.group = activeGroupName || ''
+-          item.textContent = `${node.name} · ${node.proto} · ${node.ping === '--' ? '--' : `${node.ping} ms`}`
+-          body.append(item)
+-        }
+-      }
+-      overlay.classList.add('open')
+-    })
+-    const modalNodeList = shell.querySelector<HTMLElement>('#modalNodeList')
+-    const handleModalNodeSelect = (event: Event) => {
+-      const item = (event.target as HTMLElement).closest<HTMLElement>('.modal-node-item')
+-      const groupName = item?.dataset.group || activeGroupName
+-      const nodeName = item?.dataset.node
+-      if (!groupName || !nodeName) return
+-      changeProxy(groupName, nodeName, activeGroup?.now)
+-      shell.querySelector('#nodeModalOverlay')?.classList.remove('open')
+-      showToast('正在切换节点…')
+-    }
+-    modalNodeList?.addEventListener('click', handleModalNodeSelect)
+-    if (modalNodeList) {
+-      cleanups.push(() =>
+-        modalNodeList.removeEventListener('click', handleModalNodeSelect),
+-      )
+-    }
+-    on<HTMLElement>('#modalCloseBtn', 'click', () => shell.querySelector('#nodeModalOverlay')?.classList.remove('open'))
+-    on<HTMLElement>('#nodeModalOverlay', 'click', (event, element) => {
+-      if (event.target === element) element.classList.remove('open')
+-    })
+-    on<HTMLElement>('.nav-item', 'click', (event, element) => {
+-      event.preventDefault()
+-      const path = ROUTE_BY_TAB[element.dataset.tab || 'home'] || '/'
+-      window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: path }))
+-    })
+-    on<HTMLElement>('#refreshSubBtn', 'click', (_event, element) => {
+-      const refreshCurrentProfile = async () => {
+-        if (!current?.uid) {
+-          showToast('没有可更新的当前订阅')
+-          return
+-        }
+-        element.setAttribute('aria-busy', 'true')
+-        element.classList.remove('rotating')
+-        void element.offsetWidth
+-        element.classList.add('rotating')
+-        try {
+-          await updateProfile(current.uid, current.option)
+-          await mutateProfiles()
+-          showToast('订阅已更新')
+-        } catch (error) {
+-          console.error('[DesignShell] 订阅更新失败:', error)
+-          showToast('订阅更新失败，请查看日志')
+-        } finally {
+-          element.removeAttribute('aria-busy')
+-        }
+-      }
+-      void refreshCurrentProfile()
+-    })
+-    const groupMenu = shell.querySelector<HTMLElement>('#groupMenu')
+-    const nodeMenu = shell.querySelector<HTMLElement>('#nodeMenu')
+-    const closeMenus = () => {
+-      groupMenu?.classList.remove('open')
+-      nodeMenu?.classList.remove('open')
+-    }
+-    on<HTMLElement>('#groupDropdown .dropdown-trigger', 'click', (event) => {
+-      event.stopPropagation()
+-      nodeMenu?.classList.remove('open')
+-      groupMenu?.classList.toggle('open')
+-    })
+-    on<HTMLElement>('#nodeDropdown .dropdown-trigger', 'click', (event) => {
+-      event.stopPropagation()
+-      groupMenu?.classList.remove('open')
+-      nodeMenu?.classList.toggle('open')
+-    })
+-    on<HTMLElement>('#groupMenu .dropdown-item', 'click', (event, element) => {
+-      event.stopPropagation()
+-      setSelectedGroupName(element.dataset.value)
+-      closeMenus()
+-    })
+-    on<HTMLElement>('#nodeMenu .dropdown-item', 'click', (event, element) => {
+-      event.stopPropagation()
+-      const groupName = element.dataset.group || activeGroupName
+-      const nodeName = element.dataset.node
+-      if (groupName && nodeName) {
+-        changeProxy(groupName, nodeName, activeGroup?.now)
+-        showToast('正在切换节点…')
+-      }
+-      closeMenus()
+-    })
+-    shell.addEventListener('click', closeMenus)
+-    cleanups.push(() => shell.removeEventListener('click', closeMenus))
+-    on<HTMLElement>('#disconnectBtn', 'click', () => {
+-      window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: '/proxies' }))
+-    })
+-    on<HTMLInputElement>('#toggleSystemProxy', 'change', (event, element) => {
+-      const target = element.checked
+-      void toggleSystemProxy(target).catch((error) => {
+-        console.error('[DesignShell] System Proxy 切换失败:', error)
+-        element.checked = systemProxyEnabled
+-        showToast('System Proxy 切换失败')
+-      })
+-    })
+-    on<HTMLInputElement>('#toggleTunMode', 'change', (event, element) => {
+-      const target = element.checked
+-      if (target && !isTunModeAvailable) {
+-        element.checked = false
+-        showToast('TUN 当前不可用：需要管理员权限或系统服务')
+-        return
+-      }
+-      void patchVerge({ enable_tun_mode: target }).catch((error) => {
+-        console.error('[DesignShell] TUN 切换失败:', error)
+-        element.checked = Boolean(verge?.enable_tun_mode)
+-        showToast('TUN 切换失败')
+-      })
+-    })
+-    on<HTMLElement>('#noticeBtn', 'click', () => {
+-      if (!profiles && groups.length === 0) {
+-        showToast('暂无可用的运行状态')
+-        return
+-      }
+-      const summary = [
+-        `订阅 ${profiles?.items?.length ?? 0}`,
+-        `策略组 ${groups.length}`,
+-        `活动连接 ${connectionSummary?.activeConnectionCount ?? 0}`,
+-      ].join(' · ')
+-      showToast(`当前软件状态：${summary}`)
+-    })
+-    on<HTMLElement>('#themeToggle', 'click', () => {
+-      const nextMode = themeMode === 'dark' ? 'light' : 'dark'
+-      void patchVerge({ theme_mode: nextMode })
+-        .then(() => {
+-          setThemeMode(nextMode)
+-          showToast(nextMode === 'light' ? '已切换至日间主题' : '已切换至夜间主题')
+-        })
+-        .catch((error) => {
+-          console.error('[DesignShell] 主题切换失败:', error)
+-          showToast('主题切换失败')
+-        })
+-    })
+-    on<HTMLElement>('#exitIpCard', 'click', async () => {
+-      const value = shell.querySelector('#exitIpAddress')?.textContent || ''
+-      if (!value || value === '--') return
+-      await navigator.clipboard?.writeText(value).catch(() => undefined)
+-      showToast(`IP 地址 ${value} 已复制`)
+-    })
+-    on<HTMLElement>('.seg-btn', 'click', (_event, element) => {
+-      const nextMode = element.dataset.mode || 'rule'
+-      void patchClashMode(nextMode)
+-        .then(async () => {
+-          await refreshClashConfig()
+-          showToast(`Clash Mode 已切换为 ${nextMode}`)
+-        })
+-        .catch((error) => {
+-          console.error('[DesignShell] Clash Mode 切换失败:', error)
+-          showToast('Clash Mode 切换失败，已保留原状态')
+-        })
+-    })
+-
+-    const input = shell.querySelector<HTMLInputElement>('#searchInput')
+-    const search = () => {
+-      const query = input?.value.trim().toLowerCase() || ''
+-      shell.querySelectorAll<HTMLElement>('.sub-item').forEach((item) => {
+-        item.style.display = !query || (item.dataset.name || '').toLowerCase().includes(query) ? 'flex' : 'none'
+-      })
+-      nodeMenu?.querySelectorAll<HTMLElement>('.dropdown-item').forEach((item) => {
+-        item.style.display = !query || (item.dataset.node || '').toLowerCase().includes(query) ? 'block' : 'none'
+-      })
+-    }
+-    const handleSearchKeyDown = (event: KeyboardEvent) => {
+-      if (event.key !== 'Enter') return
+-      const query = input?.value.trim().toLowerCase() || ''
+-      if (!query) return
+-      const route = SEARCH_DESTINATIONS.find((destination) =>
+-        destination.terms.some((term) => term.includes(query) || query.includes(term)),
+-      )
+-      if (route) {
+-        window.dispatchEvent(new CustomEvent('design-shell-navigate', { detail: route.path }))
+-        return
+-      }
+-      if (query && nodes.some((node) => node.name.toLowerCase().includes(query))) {
+-        nodeMenu?.classList.add('open')
+-      }
+-    }
+-    input?.addEventListener('input', search)
+-    input?.addEventListener('keydown', handleSearchKeyDown)
+-    if (input) {
+-      cleanups.push(() => input.removeEventListener('input', search))
+-      cleanups.push(() => input.removeEventListener('keydown', handleSearchKeyDown))
+-    }
+-
+-    return () => cleanups.forEach((cleanup) => cleanup())
+-  }, [activeGroup?.now, activeGroupName, changeProxy, connectionSummary?.activeConnectionCount, current, groups.length, isTunModeAvailable, mutateProfiles, nodes, patchVerge, profiles, refreshClashConfig, setThemeMode, showToast, systemProxyEnabled, themeMode, toggleSystemProxy, verge?.enable_tun_mode])
+-
+-  useEffect(() => {
+-    const shell = shellRef.current
+-    const canvas = shell?.querySelector<HTMLCanvasElement>('#starsCanvas')
+-    if (!canvas) return
+-    const context = canvas.getContext('2d')
+-    if (!context) return
+-    const particles = Array.from({ length: 35 }, (_, index) => ({
+-      x: ((index * 193) % 1024) / 1024,
+-      y: ((index * 317) % 683) / 683,
+-      radius: 0.35 + ((index * 7) % 12) / 10,
+-      phase: index * 0.73,
+-    }))
+-    let frame = 0
+-    const resize = () => {
+-      const rect = canvas.getBoundingClientRect()
+-      const ratio = window.devicePixelRatio || 1
+-      canvas.width = Math.max(1, Math.round(rect.width * ratio))
+-      canvas.height = Math.max(1, Math.round(rect.height * ratio))
+-      context.setTransform(ratio, 0, 0, ratio, 0, 0)
+-    }
+-    const draw = (time: number) => {
+-      const rect = canvas.getBoundingClientRect()
+-      context.clearRect(0, 0, rect.width, rect.height)
+-      for (const particle of particles) {
+-        const alpha = 0.2 + (Math.sin(time * 0.001 + particle.phase) + 1) * 0.18
+-        context.beginPath()
+-        context.arc(particle.x * rect.width, particle.y * rect.height, particle.radius, 0, Math.PI * 2)
+-        context.fillStyle = `rgba(160, 220, 255, ${alpha})`
+-        context.shadowColor = '#38bdf8'
+-        context.shadowBlur = 4
+-        context.fill()
+-      }
+-      frame = window.requestAnimationFrame(draw)
+-    }
+-    resize()
+-    const resizeObserver = new ResizeObserver(resize)
+-    resizeObserver.observe(canvas)
+-    frame = window.requestAnimationFrame(draw)
+-    return () => {
+-      window.cancelAnimationFrame(frame)
+-      resizeObserver.disconnect()
+-    }
+-  }, [])
+-
+-  useEffect(() => {
+-    const history = trafficHistoryRef.current
+-    const timestamp = Date.now()
+-    history.down.push({ value: Math.max(0, traffic?.down || 0), timestamp })
+-    history.up.push({ value: Math.max(0, traffic?.up || 0), timestamp })
+-    history.down.splice(0, Math.max(0, history.down.length - 60))
+-    history.up.splice(0, Math.max(0, history.up.length - 60))
+-    renderTrafficRef.current?.()
+-  }, [traffic])
+-
+-  useEffect(() => {
+-    const shell = shellRef.current
+-    const canvas = shell?.querySelector<HTMLCanvasElement>('#trafficCanvas')
+-    if (!canvas) return
+-    const context = canvas.getContext('2d')
+-    if (!context) return
+-
+-    const draw = () => {
+-      const rect = canvas.getBoundingClientRect()
+-      if (rect.width <= 0 || rect.height <= 0) return
+-      const ratio = window.devicePixelRatio || 1
+-      canvas.width = Math.max(1, Math.round(rect.width * ratio))
+-      canvas.height = Math.max(1, Math.round(rect.height * ratio))
+-      context.setTransform(ratio, 0, 0, ratio, 0, 0)
+-      const width = rect.width
+-      const height = rect.height
+-      const padLeft = 46
+-      const padBottom = 16
+-      const plotHeight = height - padBottom - 6
+-      const plotWidth = width - padLeft - 10
+-      const history = trafficHistoryRef.current
+-      const points = [...history.up, ...history.down]
+-      const maxRate = Math.max(1, ...points.map((point) => point.value))
+-      const formatRate = (value: number) => `${parseTraffic(value).join(' ')}/s`
+-      context.clearRect(0, 0, width, height)
+-      context.font = '9px sans-serif'
+-      context.fillStyle = '#64748b'
+-      context.textAlign = 'right'
+-      context.textBaseline = 'middle'
+-      for (const tick of [
+-        { label: formatRate(maxRate), y: 6 },
+-        { label: formatRate(maxRate / 2), y: 6 + plotHeight * 0.5 },
+-        { label: '0', y: 6 + plotHeight },
+-      ]) {
+-        context.fillText(tick.label, padLeft - 8, tick.y)
+-        context.beginPath()
+-        context.setLineDash([3, 4])
+-        context.strokeStyle = 'rgba(56, 189, 248, 0.12)'
+-        context.moveTo(padLeft, tick.y)
+-        context.lineTo(padLeft + plotWidth, tick.y)
+-        context.stroke()
+-      }
+-      context.setLineDash([])
+-      context.textAlign = 'center'
+-      context.textBaseline = 'top'
+-      const timePoints = history.down
+-      const labelCount = Math.min(6, timePoints.length)
+-      for (let index = 0; index < labelCount; index++) {
+-        const pointIndex =
+-          labelCount === 1
+-            ? 0
+-            : Math.round((index * (timePoints.length - 1)) / (labelCount - 1))
+-        const point = timePoints[pointIndex]
+-        const label = point
+-          ? new Date(point.timestamp).toLocaleTimeString([], {
+-              hour: '2-digit',
+-              minute: '2-digit',
+-            })
+-          : ''
+-        context.fillText(
+-          label,
+-          padLeft + (plotWidth / Math.max(1, labelCount - 1)) * index,
+-          height - padBottom + 3,
+-        )
+-      }
+-
+-      const drawLine = (
+-        series: Array<{ value: number; timestamp: number }>,
+-        stroke: string,
+-        fill: string,
+-      ) => {
+-        if (series.length < 2) return
+-        const step = plotWidth / Math.max(1, series.length - 1)
+-        context.beginPath()
+-        series.forEach((point, index) => {
+-          const x = padLeft + index * step
+-          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
+-          if (index === 0) context.moveTo(x, y)
+-          else context.lineTo(x, y)
+-        })
+-        context.lineTo(padLeft + (series.length - 1) * step, 6 + plotHeight)
+-        context.lineTo(padLeft, 6 + plotHeight)
+-        context.closePath()
+-        context.fillStyle = fill
+-        context.fill()
+-        context.beginPath()
+-        series.forEach((point, index) => {
+-          const x = padLeft + index * step
+-          const y = 6 + plotHeight * (1 - Math.min(1, point.value / maxRate))
+-          if (index === 0) context.moveTo(x, y)
+-          else context.lineTo(x, y)
+-        })
+-        context.strokeStyle = stroke
+-        context.lineWidth = 1.8
+-        context.shadowColor = stroke
+-        context.shadowBlur = 6
+-        context.stroke()
+-        context.shadowBlur = 0
+-      }
+-      drawLine(history.up, '#e879f9', 'rgba(232, 121, 249, 0.20)')
+-      drawLine(history.down, '#00d2ff', 'rgba(0, 210, 255, 0.24)')
+-    }
+-
+-    let frame: number | undefined
+-    const scheduleDraw = () => {
+-      if (frame !== undefined) return
+-      frame = window.requestAnimationFrame(() => {
+-        frame = undefined
+-        draw()
+-      })
+-    }
+-    renderTrafficRef.current = scheduleDraw
+-    const resizeObserver = new ResizeObserver(scheduleDraw)
+-    resizeObserver.observe(canvas.parentElement || canvas)
+-    scheduleDraw()
+-    return () => {
+-      resizeObserver.disconnect()
+-      if (frame !== undefined) window.cancelAnimationFrame(frame)
+-      if (renderTrafficRef.current === scheduleDraw) {
+-        renderTrafficRef.current = null
+-      }
+-    }
+-  }, [])
+-
+-  const markup = useMemo(() => sanitizeDesignDocument(designDocument), [])
+-  return <div ref={shellRef} className="design-static-shell" dangerouslySetInnerHTML={{ __html: markup }} />
+-}
+-
+-export const DesignShell = ({ children, isHome }: { children: ReactNode; isHome: boolean }) => {
+-  const navigate = useNavigate()
+-  const { pathname } = useLocation()
+-  const { minimize, close, toggleMaximize } = useWindowControls()
+-  const themeMode = useThemeMode()
+-
+-  useEffect(() => {
+-    const navigateListener = (event: Event) => {
+-      const path = (event as CustomEvent<string>).detail
+-      navigate(path)
+-    }
+-    window.addEventListener('design-shell-navigate', navigateListener)
+-    return () => window.removeEventListener('design-shell-navigate', navigateListener)
+-  }, [navigate])
+-
+-  useEffect(() => {
+-    const root = document.querySelector('.design-static-shell')
+-    if (!root) return
+-    const bindWindowControl = (selector: string, name: string, action: () => Promise<void>) => {
+-      const button = root.querySelector(selector)
+-      if (!button) return () => {}
+-      const listener = () => {
+-        void action().catch((error) =>
+-          console.error(`[DesignShell] ${name} 窗口操作失败:`, error),
+-        )
+-      }
+-      button.addEventListener('click', listener)
+-      return () => button.removeEventListener('click', listener)
+-    }
+-    const cleanups = [
+-      bindWindowControl('#winMin', '最小化', minimize),
+-      bindWindowControl('#winMax', '最大化/恢复', toggleMaximize),
+-      bindWindowControl('#winClose', '关闭', close),
+-    ]
+-    return () => cleanups.forEach((cleanup) => cleanup())
+-  }, [close, minimize, toggleMaximize])
+-
+-  useEffect(() => {
+-    const root = document.querySelector('.design-static-shell')
+-    if (!root) return
+-    const activeTab = Object.entries(ROUTE_BY_TAB).find(([, path]) => path === pathname)?.[0] || 'home'
+-    root.querySelectorAll<HTMLElement>('.nav-item').forEach((item) => {
+-      item.classList.toggle('active', item.dataset.tab === activeTab)
+-    })
+-  }, [pathname])
+-
+-  return (
+-    <div
+-      className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`}
+-      data-design-theme={themeMode}
+-    >
+-      <div className="viewport-wrapper">
+-        <div className="window-shell" data-design-shell="true">
+-          <DesignTelemetryBridge />
+-          <div
+-            className="design-shell-drag-region"
+-            data-tauri-drag-region="true"
+-            onDoubleClick={() => {
+-              void toggleMaximize().catch((error) =>
+-                console.error('[DesignShell] 双击最大化/恢复失败:', error),
+-              )
+-            }}
+-          />
+-          <div className="design-route-content" aria-hidden={isHome}>
+-            {children}
+-          </div>
+-        </div>
+-      </div>
+-    </div>
+-  )
+-}
++export { RecoveredDesignShell as DesignShell } from './recovered-design-shell'
+diff --git a/src/components/layout/recovered-design-shell.tsx b/src/components/layout/recovered-design-shell.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b328c0f0473195ffc8716a0ad41de6063e8a5d0
+--- /dev/null
++++ b/src/components/layout/recovered-design-shell.tsx
+@@ -0,0 +1,506 @@
++import {
++  type ChangeEvent,
++  type ReactNode,
++  useCallback,
++  useEffect,
++  useMemo,
++  useRef,
++  useState,
++} from 'react'
++import { useLocation, useNavigate } from 'react-router'
++
++import { buildDashboardProxyModel } from '@/adapters/proxy-runtime'
++import '@/assets/design-dashboard/css/style.css'
++import '@/assets/styles/design-shell.scss'
++import { TrafficChart } from '@/components/dashboard/traffic-chart'
++import { useConnectionSummaryData } from '@/hooks/use-connection-data'
++import { useProfiles } from '@/hooks/use-profiles'
++import { useProxySelection } from '@/hooks/use-proxy-selection'
++import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
++import { useSystemState } from '@/hooks/use-system-state'
++import { useVerge } from '@/hooks/use-verge'
++import { useWindowControls } from '@/hooks/use-window'
++import {
++  useAppRefreshers,
++  useClashConfigData,
++  useProxiesData,
++} from '@/providers/app-data-context'
++import { getIpInfo } from '@/services/api'
++import { patchClashMode, updateProfile } from '@/services/cmds'
++import { showNotice } from '@/services/notice-service'
++import { useQuery } from '@/services/query-client'
++import { useSetThemeMode, useThemeMode } from '@/services/states'
++import parseTraffic from '@/utils/parse-traffic'
++
++const NAVIGATION = [
++  { label: '首页', path: '/', icon: '⌂' },
++  { label: '代理', path: '/proxies', icon: '◎' },
++  { label: '订阅', path: '/profile', icon: '▤' },
++  { label: '连接', path: '/connections', icon: '⌁' },
++  { label: '规则', path: '/rules', icon: '◇' },
++  { label: '日志', path: '/logs', icon: '≡' },
++  { label: '测试', path: '/unlock', icon: '◌' },
++  { label: '设置', path: '/settings', icon: '⚙' },
++] as const
++
++type SearchResult = {
++  groupName: string
++  nodeName: string
++  previousNode?: string
++}
++
++const SEARCH_DESTINATIONS = [
++  { terms: ['首页', 'home'], path: '/' },
++  { terms: ['代理', 'proxy', '节点', 'node'], path: '/proxies' },
++  { terms: ['订阅', 'subscription', 'profile'], path: '/profile' },
++  { terms: ['连接', 'connection'], path: '/connections' },
++  { terms: ['规则', 'rule'], path: '/rules' },
++  { terms: ['日志', 'log'], path: '/logs' },
++  { terms: ['测试', 'test', '解锁', 'unlock'], path: '/unlock' },
++  { terms: ['设置', 'setting'], path: '/settings' },
++] as const
++
++const isSelectableGroup = (group?: { type?: string }) =>
++  Boolean(group && ['Selector', 'URLTest', 'Fallback'].includes(group.type ?? ''))
++
++const formatDate = (timestamp?: number) => {
++  if (!timestamp) return 'Not provided'
++  const date = new Date(timestamp * 1000)
++  return Number.isNaN(date.valueOf()) ? 'Not provided' : date.toISOString().slice(0, 10)
++}
++
++const StarField = () => {
++  const canvasRef = useRef<HTMLCanvasElement>(null)
++
++  useEffect(() => {
++    const canvas = canvasRef.current
++    if (!canvas) return
++    const context = canvas.getContext('2d')
++    if (!context) return
++
++    const particles = Array.from({ length: 24 }, (_, index) => ({
++      x: ((index * 193) % 997) / 997,
++      y: ((index * 317) % 991) / 991,
++      radius: 0.4 + ((index * 7) % 9) / 10,
++      phase: index * 0.71,
++    }))
++    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
++    let frame: number | undefined
++    let lastFrameAt = 0
++    let size = { width: 0, height: 0, ratio: 0 }
++
++    const resize = () => {
++      const rect = canvas.getBoundingClientRect()
++      const ratio = window.devicePixelRatio || 1
++      if (rect.width === size.width && rect.height === size.height && ratio === size.ratio) {
++        return rect
++      }
++      size = { width: rect.width, height: rect.height, ratio }
++      canvas.width = Math.max(1, Math.round(rect.width * ratio))
++      canvas.height = Math.max(1, Math.round(rect.height * ratio))
++      context.setTransform(ratio, 0, 0, ratio, 0, 0)
++      return rect
++    }
++
++    const draw = (time = 0) => {
++      const rect = resize()
++      context.clearRect(0, 0, rect.width, rect.height)
++      particles.forEach((particle) => {
++        context.beginPath()
++        context.arc(particle.x * rect.width, particle.y * rect.height, particle.radius, 0, Math.PI * 2)
++        context.fillStyle = `rgba(160, 220, 255, ${0.16 + (Math.sin(time * 0.001 + particle.phase) + 1) * 0.12})`
++        context.fill()
++      })
++    }
++
++    const tick = (time: number) => {
++      if (!document.hidden && !reducedMotion.matches && time - lastFrameAt >= 33) {
++        lastFrameAt = time
++        draw(time)
++      }
++      frame = window.requestAnimationFrame(tick)
++    }
++    const onVisibilityChange = () => {
++      if (!document.hidden) draw(performance.now())
++    }
++    const observer = new ResizeObserver(() => draw(performance.now()))
++    observer.observe(canvas)
++    document.addEventListener('visibilitychange', onVisibilityChange)
++    draw(performance.now())
++    if (!reducedMotion.matches) frame = window.requestAnimationFrame(tick)
++
++    return () => {
++      observer.disconnect()
++      document.removeEventListener('visibilitychange', onVisibilityChange)
++      if (frame !== undefined) window.cancelAnimationFrame(frame)
++    }
++  }, [])
++
++  return <canvas ref={canvasRef} className="design-starfield" aria-hidden="true" />
++}
++
++const DesignHeader = () => {
++  const navigate = useNavigate()
++  const { minimize, close, toggleMaximize } = useWindowControls()
++  const { patchVerge } = useVerge()
++  const { proxies } = useProxiesData()
++  const { refreshProxy } = useAppRefreshers()
++  const { changeProxyVerified } = useProxySelection({
++    onSuccess: () => void refreshProxy(),
++  })
++  const themeMode = useThemeMode()
++  const setThemeMode = useSetThemeMode()
++  const [query, setQuery] = useState('')
++  const [selectingSearchResult, setSelectingSearchResult] = useState(false)
++  const nodeResults = useMemo<SearchResult[]>(() => {
++    const normalized = query.trim().toLowerCase()
++    if (!normalized) return []
++    return (proxies?.groups ?? []).flatMap((group: IProxyGroupItem) =>
++      (group.all ?? []).flatMap((proxy) => {
++        const name = typeof proxy === 'string' ? proxy : proxy.name
++        return name && name.toLowerCase().includes(normalized)
++          ? [{ groupName: group.name, nodeName: name, previousNode: group.now }]
++          : []
++      }),
++    ).slice(0, 6)
++  }, [proxies?.groups, query])
++
++  const submitSearch = useCallback(() => {
++    const normalized = query.trim().toLowerCase()
++    if (!normalized) return
++    const destination = SEARCH_DESTINATIONS.find((candidate) =>
++      candidate.terms.some((term) => term.includes(normalized) || normalized.includes(term)),
++    )
++    if (destination) {
++      navigate(destination.path)
++      return
++    }
++    navigate(`/proxies?search=${encodeURIComponent(query.trim())}`)
++    showNotice.info(`Search opened for “${query.trim()}”.`)
++  }, [navigate, query])
++
++  const toggleTheme = useCallback(async () => {
++    const nextMode = themeMode === 'dark' ? 'light' : 'dark'
++    try {
++      await patchVerge({ theme_mode: nextMode })
++      setThemeMode(nextMode)
++    } catch (error) {
++      showNotice.error(error)
++    }
++  }, [patchVerge, setThemeMode, themeMode])
++
++  const selectSearchResult = useCallback(
++    async (result: SearchResult) => {
++      if (selectingSearchResult) return
++      setSelectingSearchResult(true)
++      try {
++        await changeProxyVerified(result.groupName, result.nodeName, result.previousNode)
++        await refreshProxy()
++        setQuery('')
++        navigate('/')
++        showNotice.success('Proxy selection verified.')
++      } catch (error) {
++        await refreshProxy()
++        showNotice.error(error)
++      } finally {
++        setSelectingSearchResult(false)
++      }
++    },
++    [changeProxyVerified, navigate, refreshProxy, selectingSearchResult],
++  )
++
++  return (
++    <header className="top-header">
++      <div className="brand-area">
++        <div className="brand-logo" aria-hidden="true">◆</div>
++        <div className="brand-text">
++          <div className="brand-title">Clash Verge</div>
++          <div className="brand-sub">Connect a Bigger World</div>
++        </div>
++      </div>
++      <div className="hero-slogan">
++        <div className="slogan-main">连接无界 · 探索更大的世界</div>
++        <div className="slogan-sub">稳定 · 高速 · 安全</div>
++      </div>
++      <div className="top-controls">
++        <div className="design-search">
++        <label className="search-box">
++          <span className="search-icon" aria-hidden="true">⌕</span>
++          <input
++            value={query}
++            onChange={(event) => setQuery(event.target.value)}
++            onKeyDown={(event) => {
++              if (event.key === 'Enter') submitSearch()
++            }}
++            placeholder="搜索节点、规则或设置..."
++            aria-label="Search routes and proxy nodes"
++          />
++        </label>
++        {nodeResults.length > 0 && (
++          <div className="design-search-results" role="listbox" aria-label="Matching proxy nodes">
++            {nodeResults.map((result) => (
++              <button key={`${result.groupName}:${result.nodeName}`} type="button" disabled={selectingSearchResult} onClick={() => void selectSearchResult(result)}>
++                <span>{result.nodeName}</span><small>{result.groupName}</small>
++              </button>
++            ))}
++          </div>
++        )}
++        </div>
++        <button className="theme-toggle" type="button" onClick={() => void toggleTheme()} aria-label="Toggle theme">
++          <span className={themeMode === 'light' ? 'theme-option active' : 'theme-option'}>☀</span>
++          <span className={themeMode === 'dark' ? 'theme-option active' : 'theme-option'}>☾</span>
++        </button>
++        <button className="icon-btn" type="button" onClick={() => navigate('/logs')} title="Open logs">
++          ♢
++        </button>
++        <div className="window-actions" data-tauri-drag-region="false">
++          <button className="win-btn win-min" type="button" onClick={() => void minimize()} aria-label="Minimize">−</button>
++          <button className="win-btn win-max" type="button" onClick={() => void toggleMaximize()} aria-label="Maximize or restore">□</button>
++          <button className="win-btn win-close" type="button" onClick={() => void close()} aria-label="Close">×</button>
++        </div>
++      </div>
++    </header>
++  )
++}
++
++const DesignSidebar = () => {
++  const { pathname } = useLocation()
++  const navigate = useNavigate()
++  return (
++    <aside className="sidebar">
++      <nav className="nav-menu" aria-label="Application navigation">
++        {NAVIGATION.map((item) => (
++          <button
++            key={item.path}
++            className={pathname === item.path ? 'nav-item active' : 'nav-item'}
++            type="button"
++            onClick={() => navigate(item.path)}
++          >
++            <span className="nav-icon" aria-hidden="true">{item.icon}</span>
++            <span className="nav-label">{item.label}</span>
++          </button>
++        ))}
++      </nav>
++      <div className="status-pill"><span className="ver-text">v2.5.2</span><span className="live-dot" /><span className="live-text">运行中</span></div>
++    </aside>
++  )
++}
++
++const SubscriptionCard = () => {
++  const { profiles, current, mutateProfiles } = useProfiles()
++  const [refreshing, setRefreshing] = useState(false)
++  const [now] = useState(() => Date.now())
++  const items = profiles?.items?.filter(Boolean) ?? []
++  const extra = current?.extra
++  const used = Number(extra?.upload ?? 0) + Number(extra?.download ?? 0)
++  const total = Number(extra?.total ?? 0)
++  const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0
++  const [usedValue, usedUnit] = parseTraffic(used)
++  const [totalValue, totalUnit] = parseTraffic(total)
++  const daysLeft = extra?.expire ? Math.max(0, Math.ceil((extra.expire * 1000 - now) / 86400000)) : null
++
++  const refreshCurrent = async () => {
++    if (!current?.uid) {
++      showNotice.info('No active profile to update.')
++      return
++    }
++    setRefreshing(true)
++    try {
++      await updateProfile(current.uid, current.option)
++      await mutateProfiles()
++      showNotice.success('Profile updated.')
++    } catch (error) {
++      showNotice.error(error)
++    } finally {
++      setRefreshing(false)
++    }
++  }
++
++  return (
++    <section className="card card-subscription">
++      <div className="card-header">
++        <div className="card-title-group"><span className="card-title">总订阅</span></div>
++        <button className="btn-refresh" type="button" disabled={refreshing} onClick={() => void refreshCurrent()}>{refreshing ? '更新中…' : '更新订阅'}</button>
++      </div>
++      <div className="traffic-summary">
++        <div className="traffic-numbers">
++          <span className="traffic-used">{total > 0 ? usedValue : '--'}</span>
++          <span className="traffic-unit">{total > 0 ? usedUnit : ''}</span>
++          <span className="traffic-divider">{total > 0 ? '/' : ''}</span>
++          <span className="traffic-total">{total > 0 ? `${totalValue} ${totalUnit}` : 'No active profile'}</span>
++        </div>
++        <div className="traffic-percentage">{total > 0 ? `${percent}%` : '--'}</div>
++      </div>
++      <div className="progress-bar-wrap"><div className="progress-bar-fill" style={{ width: `${percent}%` }} /></div>
++      <div className="subscription-meta">
++        <span>{daysLeft === null ? 'Expire: Not provided' : `距离到期还有 ${daysLeft} 天 (${formatDate(extra?.expire)})`}</span>
++        <span>共 {items.length} 个资源</span>
++      </div>
++      <div className="sub-list">
++        {items.length === 0 ? (
++          <div className="design-data-empty">No active profile</div>
++        ) : items.map((profile) => {
++          const profileExtra = profile.extra
++          const profileUsed = Number(profileExtra?.upload ?? 0) + Number(profileExtra?.download ?? 0)
++          const profileTotal = Number(profileExtra?.total ?? 0)
++          const profilePercent = profileTotal > 0 ? Math.min(100, Math.round((profileUsed / profileTotal) * 100)) : 0
++          const [profileUsedValue, profileUsedUnit] = parseTraffic(profileUsed)
++          const [profileTotalValue, profileTotalUnit] = parseTraffic(profileTotal)
++          return (
++            <div className="sub-item" key={profile.uid}>
++              <div className="sub-brand"><span className="custom-icon">✦</span><span className="sub-name">{profile.name || profile.file || profile.uid}</span></div>
++              <div className="sub-usage">{profileTotal > 0 ? `${profileUsedValue} ${profileUsedUnit} / ${profileTotalValue} ${profileTotalUnit}` : '--'}</div>
++              <div className="sub-prog-wrap"><div className="sub-prog-bar" style={{ width: `${profilePercent}%` }} /></div>
++              <div className="sub-percent">{profileTotal > 0 ? `${profilePercent}%` : '--'}</div>
++              <div className="sub-reset">{formatDate(profileExtra?.expire)}</div>
++            </div>
++          )
++        })}
++      </div>
++    </section>
++  )
++}
++
++const CurrentNodeCard = () => {
++  const { proxies } = useProxiesData()
++  const { refreshProxy } = useAppRefreshers()
++  const [groupName, setGroupName] = useState<string>('')
++  const proxyModel = useMemo(
++    () => buildDashboardProxyModel(proxies, groupName),
++    [groupName, proxies],
++  )
++  const { groups, selectedGroup: activeGroup, nodes, selectedNode } = proxyModel
++  const [changing, setChanging] = useState(false)
++  const { changeProxyVerified } = useProxySelection({
++    onSuccess: () => void refreshProxy(),
++  })
++  const { data: ipInfo } = useQuery({
++    queryKey: ['cv_ip_info_cache'],
++    queryFn: getIpInfo,
++    staleTime: Infinity,
++    retry: 1,
++    refetchOnWindowFocus: false,
++    refetchOnReconnect: false,
++  })
++
++  const onNodeChange = async (event: ChangeEvent<HTMLSelectElement>) => {
++    const nextNode = event.target.value
++    if (!activeGroup || !nextNode || nextNode === activeGroup.now) return
++    setChanging(true)
++    try {
++      await changeProxyVerified(activeGroup.name, nextNode, activeGroup.now)
++      await refreshProxy()
++      showNotice.success('Proxy selection verified.')
++    } catch (error) {
++      await refreshProxy()
++      showNotice.error(error)
++    } finally {
++      setChanging(false)
++    }
++  }
++
++  const copyIp = async () => {
++    if (!ipInfo?.ip) return
++    await navigator.clipboard?.writeText(ipInfo.ip).catch(() => undefined)
++    showNotice.info('Exit IP copied.')
++  }
++
++  return (
++    <section className="card card-node">
++      <div className="card-header"><div className="card-title-group"><span className="node-live-dot" /><span className="card-title">当前节点</span></div><span className="badge-status-connected">{selectedNode ? '已选择' : 'No proxy available'}</span></div>
++      <div className="active-node-box">
++        <div className="node-text">
++          <div className="node-main-name">{selectedNode?.name ?? 'No proxy available'}</div>
++          <div className="node-tags"><span className="tag-protocol">{selectedNode?.type ?? '--'}</span><span className="tag-ping">{selectedNode?.delay === null || selectedNode === undefined ? '--' : `${selectedNode.delay} ms`}</span></div>
++        </div>
++      </div>
++      <div className="proxy-selectors">
++        <label className="select-group"><span className="select-label">代理组</span><select value={activeGroup?.name ?? ''} onChange={(event) => setGroupName(event.target.value)}><option value="">No proxy available</option>{groups.map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}</select></label>
++        <label className="select-group"><span className="select-label">节点</span><select value={activeGroup?.now ?? ''} disabled={!isSelectableGroup(activeGroup) || changing || nodes.length === 0} onChange={(event) => void onNodeChange(event)}><option value="">{nodes.length === 0 ? 'No proxy available' : 'Select proxy'}</option>{nodes.map((node) => <option key={node.name} value={node.name}>{node.name}{node.delay === null ? '' : ` (${node.delay} ms)`}</option>)}</select></label>
++      </div>
++      <div className="exit-ip-section"><div className="exit-ip-label">出口 IP 信息</div><button className="exit-ip-card" type="button" onClick={() => void copyIp()}><span className="ip-address">{ipInfo?.ip ?? '--'}</span><span className="ip-location">{[ipInfo?.city, ipInfo?.region, ipInfo?.country].filter(Boolean).join(', ') || 'Unavailable'}</span></button></div>
++    </section>
++  )
++}
++
++const NetworkControlsCard = () => {
++  const { clashConfig } = useClashConfigData()
++  const { refreshClashConfig } = useAppRefreshers()
++  const { indicator: systemProxyEnabled, toggleSystemProxy } = useSystemProxyState()
++  const { verge, patchVerge } = useVerge()
++  const { isTunModeAvailable } = useSystemState()
++  const [updating, setUpdating] = useState(false)
++  const mode = String(clashConfig?.mode ?? 'rule').toLowerCase()
++
++  const updateMode = async (nextMode: string) => {
++    if (nextMode === mode) return
++    setUpdating(true)
++    try {
++      await patchClashMode(nextMode)
++      await refreshClashConfig()
++    } catch (error) {
++      await refreshClashConfig()
++      showNotice.error(error)
++    } finally {
++      setUpdating(false)
++    }
++  }
++
++  const updateTun = async (enabled: boolean) => {
++    if (enabled && !isTunModeAvailable) {
++      showNotice.error('TUN is unavailable: install or start the service first.')
++      return
++    }
++    setUpdating(true)
++    try {
++      await patchVerge({ enable_tun_mode: enabled })
++    } catch (error) {
++      showNotice.error(error)
++    } finally {
++      setUpdating(false)
++    }
++  }
++
++  return (
++    <section className="card card-settings-mode">
++      <div className="settings-subcard"><div className="subcard-header"><span className="subcard-title">网络设置</span></div><div className="settings-list">
++        <label className="setting-row"><span className="setting-info"><span className="setting-name">系统代理</span><span className="setting-desc">状态来自 Windows 系统代理</span></span><input type="checkbox" checked={systemProxyEnabled} disabled={updating} onChange={(event) => void toggleSystemProxy(event.target.checked).catch(showNotice.error)} /></label>
++        <label className="setting-row"><span className="setting-info"><span className="setting-name">虚拟网卡模式</span><span className="setting-desc">{isTunModeAvailable ? 'TUN 模式' : 'Unavailable'}</span></span><input type="checkbox" checked={Boolean(verge?.enable_tun_mode)} disabled={updating || !isTunModeAvailable} onChange={(event) => void updateTun(event.target.checked)} /></label>
++      </div></div>
++      <div className="subcard-divider" />
++      <div className="mode-subcard"><div className="subcard-header"><span className="subcard-title">代理模式</span></div><div className="segmented-control">{['rule', 'global', 'direct'].map((item) => <button key={item} className={mode === item ? 'seg-btn active' : 'seg-btn'} type="button" disabled={updating} onClick={() => void updateMode(item)}>{item === 'rule' ? '规则' : item === 'global' ? '全局' : '直连'}</button>)}</div></div>
++    </section>
++  )
++}
++
++const ConnectionCard = () => {
++  const { response: { data } } = useConnectionSummaryData()
++  return <section className="card card-status"><div className="card-header"><span className="card-title">连接状态</span></div><div className="status-grid"><div className="status-box"><span className="status-box-label">活跃连接</span><span className="status-val">{data.activeConnectionCount}</span></div><div className="status-box"><span className="status-box-label">内核占用</span><span className="status-val">--</span></div></div></section>
++}
++
++const HomeDashboard = () => (
++  <main className="design-dashboard" aria-label="Dashboard">
++    <SubscriptionCard />
++    <CurrentNodeCard />
++    <NetworkControlsCard />
++    <TrafficChart />
++    <ConnectionCard />
++    <footer className="footer-bar"><span>互联网应该是开放的，世界应该是互联的。</span><span>Clash Verge v2.5.2</span></footer>
++  </main>
++)
++
++export const RecoveredDesignShell = ({ children, isHome }: { children: ReactNode; isHome: boolean }) => {
++  const { toggleMaximize } = useWindowControls()
++  const themeMode = useThemeMode()
++  return (
++    <div className={`design-app ${isHome ? 'home-mode' : 'route-mode'}`} data-theme={themeMode} data-design-theme={themeMode}>
++      <div className="viewport-wrapper"><div className="window-shell">
++        <StarField />
++        <DesignHeader />
++        <DesignSidebar />
++        <div className="design-shell-drag-region" data-tauri-drag-region="true" onDoubleClick={() => void toggleMaximize()} />
++        {isHome ? <HomeDashboard /> : <main className="design-route-content">{children}</main>}
++      </div></div>
++    </div>
++  )
++}
+diff --git a/src/components/setting/mods/clash-port-viewer.tsx b/src/components/setting/mods/clash-port-viewer.tsx
+index d46ceedea4ec507722c366d548f7ae3c05c4c879..51b1da192ac64b30fc3cb614e935a5180891d57b 100644
+--- a/src/components/setting/mods/clash-port-viewer.tsx
++++ b/src/components/setting/mods/clash-port-viewer.tsx
+@@ -26,11 +26,8 @@ interface ClashPortViewerRef {
+   close: () => void
+ }
+ 
+-const generateRandomPort = () => {
+-  const randomValue = new Uint32Array(1)
+-  crypto.getRandomValues(randomValue)
+-  return (randomValue[0] % (65535 - 1025 + 1)) + 1025
+-}
++const generateRandomPort = () =>
++  Math.floor(Math.random() * (65535 - 1025 + 1)) + 1025
+ 
+ export const ClashPortViewer = forwardRef<ClashPortViewerRef>((_, ref) => {
+   const { t } = useTranslation()
+diff --git a/src/components/shared/proxy-control-switches.tsx b/src/components/shared/proxy-control-switches.tsx
+index 27c3b717692e18f7488c433fcd5bb9550fd1d7e6..50c75029985f423da194a2351789ff7162d66eff 100644
+--- a/src/components/shared/proxy-control-switches.tsx
++++ b/src/components/shared/proxy-control-switches.tsx
+@@ -129,10 +129,6 @@ const ProxyControlSwitches = ({
+   onError,
+   noRightPadding = false,
+ }: ProxySwitchProps) => {
+-  // `pnpm dev` runs the Rust backend with the `verge-dev` feature. That
+-  // feature deliberately blocks host-wide proxy, TUN, and service operations
+-  // so a dashboard session cannot affect an installed production application.
+-  const isIsolatedDevRuntime = import.meta.env.DEV
+   const { t } = useTranslation()
+   const { verge, mutateVerge, patchVerge } = useVerge()
+   const { installServiceAndRestartCore } = useServiceInstaller()
+@@ -193,15 +189,10 @@ const ProxyControlSwitches = ({
+         <SwitchRow
+           label={t('settings.sections.proxyControl.fields.systemProxy')}
+           active={systemProxyIndicator}
+-          infoTitle={
+-            isIsolatedDevRuntime
+-              ? 'System Proxy is locked while running the isolated development build.'
+-              : t('settings.sections.proxyControl.tooltips.systemProxy')
+-          }
++          infoTitle={t('settings.sections.proxyControl.tooltips.systemProxy')}
+           onInfoClick={() => sysproxyRef.current?.open()}
+           onToggle={(value) => toggleSystemProxy(value)}
+           onError={onError}
+-          disabled={isIsolatedDevRuntime}
+           highlight={systemProxyIndicator}
+         />
+       )}
+@@ -214,11 +205,11 @@ const ProxyControlSwitches = ({
+           onInfoClick={() => tunRef.current?.open()}
+           onToggle={handleTunToggle}
+           onError={onError}
+-          disabled={isIsolatedDevRuntime || !isTunModeAvailable}
++          disabled={!isTunModeAvailable}
+           highlight={enable_tun_mode || false}
+           extraIcons={
+             <>
+-              {!isIsolatedDevRuntime && !isTunModeAvailable && (
++              {!isTunModeAvailable && (
+                 <>
+                   <TooltipIcon
+                     title={t(
+diff --git a/src/hooks/use-proxy-selection.ts b/src/hooks/use-proxy-selection.ts
+index cc956f844b025679a1230250866171451cfe61bf..21bd87847205ebe211c7a8f43f26e454bf9d7365 100644
+--- a/src/hooks/use-proxy-selection.ts
++++ b/src/hooks/use-proxy-selection.ts
+@@ -2,9 +2,11 @@ import { useCallback, useMemo, useRef } from 'react'
+ import {
+   closeConnection,
+   getConnections,
++  getProxies,
+   selectNodeForGroup,
+ } from 'tauri-plugin-mihomo-api'
+ 
++import { isMihomoSelectionConfirmed } from '@/adapters/proxy-runtime'
+ import { useProfiles } from '@/hooks/use-profiles'
+ import { useVerge } from '@/hooks/use-verge'
+ import { syncTrayProxySelection } from '@/services/cmds'
+@@ -40,6 +42,12 @@ interface ProxyChangeRequest {
+   skipConfigSave: boolean
+ }
+ 
++const SELECTION_VERIFY_ATTEMPTS = 3
++const SELECTION_VERIFY_DELAY_MS = 150
++
++const wait = (ms: number) =>
++  new Promise<void>((resolve) => window.setTimeout(resolve, ms))
++
+ // 代理选择 Hook
+ export const useProxySelection = (options: ProxySelectionOptions = {}) => {
+   const { current, patchCurrent } = useProfiles()
+@@ -135,6 +143,57 @@ export const useProxySelection = (options: ProxySelectionOptions = {}) => {
+     }
+   }, [executeChange])
+ 
++  const changeProxyVerified = useCallback(
++    async (
++      groupName: string,
++      proxyName: string,
++      previousProxy?: string,
++      skipConfigSave = false,
++    ) => {
++      try {
++        await selectNodeForGroup(groupName, proxyName)
++
++        let isVerified = false
++        for (let attempt = 0; attempt < SELECTION_VERIFY_ATTEMPTS; attempt++) {
++          const response = await getProxies()
++          if (isMihomoSelectionConfirmed(response.proxies, groupName, proxyName)) {
++            isVerified = true
++            break
++          }
++          if (attempt < SELECTION_VERIFY_ATTEMPTS - 1) {
++            await wait(SELECTION_VERIFY_DELAY_MS)
++          }
++        }
++
++        if (!isVerified) {
++          throw new Error(
++            `Mihomo did not confirm ${groupName} -> ${proxyName} after selection`,
++          )
++        }
++
++        onSuccess?.()
++        syncTraySelection()
++        persistSelection(groupName, proxyName, skipConfigSave)
++
++        if (
++          config.enableConnectionCleanup &&
++          config.autoCloseConnection &&
++          previousProxy
++        ) {
++          void cleanupConnections(previousProxy)
++        }
++      } catch (error) {
++        console.error(
++          `[ProxySelection] verified selection failed: ${groupName} -> ${proxyName}`,
++          error,
++        )
++        onError?.(error)
++        throw error
++      }
++    },
++    [config, onError, onSuccess, persistSelection, syncTraySelection],
++  )
++
+   const changeProxy = useCallback(
+     (
+       groupName: string,
+@@ -175,6 +234,7 @@ export const useProxySelection = (options: ProxySelectionOptions = {}) => {
+ 
+   return {
+     changeProxy,
++    changeProxyVerified,
+     handleSelectChange,
+     handleProxyGroupChange,
+   }
+diff --git a/src/hooks/use-system-proxy-state.ts b/src/hooks/use-system-proxy-state.ts
+index 1d4271eebae0605740903954ddecaa90336bf077..01be4aabe643b80402dfc060bbf4b3fe430d5de9 100644
+--- a/src/hooks/use-system-proxy-state.ts
++++ b/src/hooks/use-system-proxy-state.ts
+@@ -44,7 +44,6 @@ export const useSystemProxyState = () => {
+   const busyRef = useRef(false)
+ 
+   const toggleSystemProxy = async (enabled: boolean) => {
+-    const previousConfigState = enable_system_proxy ?? false
+     mutateVerge(
+       (prev) => (prev ? { ...prev, enable_system_proxy: enabled } : prev),
+       false,
+@@ -63,18 +62,6 @@ export const useSystemProxyState = () => {
+           await closeAllConnections().catch(() => {})
+         }
+       }
+-    } catch (error) {
+-      // The switch is rendered from Verge state. Restore the last persisted
+-      // value before revalidating so a failed OS operation cannot leave a
+-      // visually successful but non-functional System Proxy switch.
+-      mutateVerge(
+-        (prev) =>
+-          prev
+-            ? { ...prev, enable_system_proxy: previousConfigState }
+-            : prev,
+-        false,
+-      )
+-      throw error
+     } finally {
+       busyRef.current = false
+       await revalidateQueries([['getSystemProxy'], ['getAutotemProxy']])
+diff --git a/src/pages/_layout.tsx b/src/pages/_layout.tsx
+index 9b9c4b21abc8a4d8c3f476ba9e50d0d040f6e81f..3ce3f2d8d678909841c4b46ea33088b388cc75f9 100644
+--- a/src/pages/_layout.tsx
++++ b/src/pages/_layout.tsx
+@@ -6,8 +6,8 @@ import { useTranslation } from 'react-i18next'
+ import { Outlet, useLocation, useNavigate } from 'react-router'
+ 
+ import { BaseErrorBoundary, BaseLoading } from '@/components/base'
+-import { DesignShell } from '@/components/layout/design-shell'
+ import { NoticeManager } from '@/components/layout/notice-manager'
++import { RecoveredDesignShell } from '@/components/layout/recovered-design-shell'
+ import { WindowResizeHandles } from '@/components/layout/window-controller'
+ import { useI18n } from '@/hooks/use-i18n'
+ import { useVerge } from '@/hooks/use-verge'
+@@ -71,7 +71,7 @@ const Layout = () => {
+     <ThemeProvider theme={theme}>
+       <NoticeManager position={verge?.notice_position} />
+       <WindowResizeHandles />
+-      <DesignShell isHome={isHome}>
++      <RecoveredDesignShell isHome={isHome}>
+         {isHome ? null : (
+           <BaseErrorBoundary>
+             <Outlet />
+@@ -88,7 +88,7 @@ const Layout = () => {
+             )}
+           </BaseErrorBoundary>
+         )}
+-      </DesignShell>
++      </RecoveredDesignShell>
+     </ThemeProvider>
+   )
+ }
+diff --git a/src/services/api.ts b/src/services/api.ts
+index 13cf5682317714a22dcd62955f68a87c2bd77276..888a1bf6983a71ba34cdfea21c0c1514eaac0a94 100644
+--- a/src/services/api.ts
++++ b/src/services/api.ts
+@@ -145,16 +145,9 @@ export const getIpInfo = async (): Promise<
+   const maxRetries = 2
+   const serviceTimeout = 5000
+ 
+-  const shuffledServices = IP_CHECK_SERVICES.slice()
+-  for (let index = shuffledServices.length - 1; index > 0; index--) {
+-    const randomValue = new Uint32Array(1)
+-    crypto.getRandomValues(randomValue)
+-    const swapIndex = randomValue[0] % (index + 1)
+-    ;[shuffledServices[index], shuffledServices[swapIndex]] = [
+-      shuffledServices[swapIndex],
+-      shuffledServices[index],
+-    ]
+-  }
++  const shuffledServices = IP_CHECK_SERVICES.slice().sort(
++    () => Math.random() - 0.5,
++  )
+   let lastError: unknown | null = null
+   const userAgent = await getUserAgentPromise()
+   console.debug('User-Agent for IP detection:', userAgent)
+diff --git a/src/services/delay.ts b/src/services/delay.ts
+index fd68a3aef3411fd6084dbdf10c28018a5d85dac1..3adb47c84896f6d06f945b1a82e6b198d9290fae 100644
+--- a/src/services/delay.ts
++++ b/src/services/delay.ts
+@@ -295,11 +295,13 @@ class DelayManager {
+         // 确保API调用前状态为测试中
+         this.setDelay(currName, group, -2)
+ 
+-          // Stagger requests deterministically so a batch cannot burst the
+-          // controller, without manufacturing any UI/telemetry values.
+-          if (index > 1) {
+-            await new Promise((resolve) => setTimeout(resolve, (index * 37) % 200))
+-          }
++        // 添加一些随机延迟，避免所有请求同时发出和返回
++        if (index > 1) {
++          // 第一个不延迟，保持响应性
++          await new Promise((resolve) =>
++            setTimeout(resolve, Math.random() * 200),
++          )
++        }
+ 
+         await this.checkDelay(currName, group, timeout, currProviderName)
+         if (listener) {
